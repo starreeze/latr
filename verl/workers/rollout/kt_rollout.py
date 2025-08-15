@@ -8,7 +8,6 @@ import torch.distributed
 import yaml
 from tensordict import TensorDict
 from torch import nn
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import AutoTokenizer
 
 from model.generation import KeyTokenGenConfig, KtModules, generate
@@ -57,9 +56,6 @@ class KTRollout(BaseRollout):
 
         self.module.eval()
         param_ctx = contextlib.nullcontext()
-
-        print(f"{config.num_return_sequences=} {idx.shape=} {is_validate=}")
-        print(f"is_fsdp: {isinstance(self.module, FSDP)}")
 
         # if isinstance(self.module, FSDP):
         #     # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
