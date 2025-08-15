@@ -1,0 +1,5 @@
+dataset
+__pycache__
+.pytest_cache
+old
+*.old

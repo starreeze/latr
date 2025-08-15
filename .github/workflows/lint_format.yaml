@@ -1,0 +1,51 @@
+name: Python Lint & Formatting
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  lint_format:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install black==24.10.0 flake8==7.2.0 isort==6.0.1
+          # pip install basedpyright==1.29.0
+
+      - name: Find and check text files for CRLF
+        run: |
+          # Find all non-binary files (files with charset defined)
+          find . -type f ! -path "*/\\.*" ! -path "*/\\$*\\$" | while read -r file; do
+            mime=$(file --mime "$file")
+            if echo "$mime" | grep -q "charset=" && ! echo "$mime" | grep -q "binary"; then
+              # File is likely a text file
+              if grep -U $'\r' "$file"; then
+                echo "❌ ERROR: CRLF line endings found in text file: $file"
+                exit 1
+              fi
+            fi
+          done
+
+          echo "✅ All text files use LF line endings."
+
+      - name: Run lint and format
+        run: |
+          # basedpyright --level warning --warnings
+          black --check . --line-length 110 --skip-magic-trailing-comma
+          flake8 . --ignore=E501,E203,E266,E731,E704,W503
+          isort . --check-only --line-length 110 --profile black

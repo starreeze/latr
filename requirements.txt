@@ -1,0 +1,10 @@
+trl==0.17.0
+verl==0.5.0
+vllm
+natsort
+rich
+wandb
+func_timeout
+nltk
+rouge_score
+latex2sympy2_extended[antlr4_11_0]
