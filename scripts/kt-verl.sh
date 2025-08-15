@@ -21,10 +21,11 @@ python -m train.verl.run \
     actor_rollout_ref.model.use_liger=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size=16 \
-    actor_rollout_ref.rollout.name=hf \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
+    +actor_rollout_ref.rollout.micro_batch_size=256 \
+    actor_rollout_ref.rollout.name=kt \
     actor_rollout_ref.rollout.n=8 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.adv_estimator=grpo \
     algorithm.kl_ctrl.kl_coef=0.001 \
@@ -39,4 +40,7 @@ python -m train.verl.run \
     trainer.project_name=SampleRL \
     trainer.experiment_name=$EXPERIMENT_NAME \
     kt.max_new_tokens=1024 \
-    kt.temperature=1.0
+    kt.temperature=1.0 \
+    kt.max_n_branch_per_token=2 \
+    kt.enable_param_scheduler=False \
+    kt.prob_filter_thres=0.1

@@ -3,16 +3,16 @@ import socket
 import sys
 
 import ray
-import verl
-import verl.trainer.main_ppo
 import yaml
 from transformers.hf_argparser import HfArgumentParser
+
+import verl
+import verl.trainer.main_ppo
+from model.generation import KeyTokenGenConfig
+from train.verl.reward import CountdownMathRewardManager
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
-
-from model.generation import KeyTokenGenConfig
-from train.verl.patch import apply_kt_patch, kt_conf_path
-from train.verl.reward import CountdownMathRewardManager
+from verl.workers.rollout.kt_rollout import kt_conf_path
 
 assert verl.__version__ == "0.5.0"
 
@@ -41,6 +41,7 @@ class TaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
+
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
@@ -202,9 +203,8 @@ def handle_args():
 
     parser = HfArgumentParser([KeyTokenGenConfig])  # type: ignore
     args: KeyTokenGenConfig = parser.parse_args_into_dataclasses(kt_args)[0]
+    os.makedirs(os.path.dirname(kt_conf_path), exist_ok=True)
     yaml.dump({"path": path, "kt": args.__dict__}, open(kt_conf_path, "w"))
-
-    apply_kt_patch()
 
     kt_idx.reverse()
     for idx in kt_idx:

@@ -46,6 +46,6 @@ jobs:
       - name: Run lint and format
         run: |
           # basedpyright --level warning --warnings
-          black --check . --line-length 110 --skip-magic-trailing-comma
-          flake8 . --ignore=E501,E203,E266,E731,E704,W503
-          isort . --check-only --line-length 110 --profile black
+          black --check . --line-length 110 --skip-magic-trailing-comma --exclude verl
+          flake8 . --ignore=E501,E203,E266,E731,E704,W503 --exclude=verl
+          isort . --check-only --line-length 110 --profile black --skip verl
