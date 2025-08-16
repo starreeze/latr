@@ -3,7 +3,6 @@ from math import isclose
 
 import regex
 from func_timeout import func_timeout
-from latex2sympy2_extended import latex2sympy
 from sympy import N, simplify
 from sympy.parsing.latex import parse_latex
 from sympy.parsing.sympy_parser import parse_expr
@@ -50,7 +49,7 @@ def validate_countdown_equation(equation_str: str, available_numbers: list[int])
 
 
 def _parse_latex(s):
-    for f in [parse_latex, parse_expr, latex2sympy]:
+    for f in [parse_latex, parse_expr]:
         try:
             return f(s.replace("\\\\", "\\"))
         except Exception:

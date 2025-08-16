@@ -32,6 +32,7 @@ python -m train.verl.run \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
+    trainer.total_epochs=1 \
     trainer.val_before_train=False \
     trainer.default_hdfs_dir=null \
     trainer.n_gpus_per_node=$N_GPUS \
@@ -39,4 +40,5 @@ python -m train.verl.run \
     trainer.save_freq=100 \
     trainer.test_freq=10000 \
     trainer.project_name=SampleRL \
-    trainer.experiment_name=$EXPERIMENT_NAME
+    trainer.experiment_name=$EXPERIMENT_NAME \
+    2>&1 | tee $EXPERIMENT_NAME.log

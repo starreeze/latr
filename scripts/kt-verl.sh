@@ -2,6 +2,7 @@ DATA_DIR=dataset/countdown
 BASE_MODEL=/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B
 N_GPUS=8
 EXPERIMENT_NAME=kt-qwen2.5-3b-countdown
+MODEL_ARCH=qwen2
 
 python -m train.verl.run \
     data.train_files=$DATA_DIR/train.parquet \
@@ -10,13 +11,15 @@ python -m train.verl.run \
     data.max_prompt_length=256 \
     data.max_response_length=1024 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.use_remove_padding=False \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.shuffle=True \
+    +actor_rollout_ref.actor.data_loader_seed=42 \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.model.use_liger=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
@@ -31,6 +34,7 @@ python -m train.verl.run \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
+    trainer.total_epochs=1 \
     trainer.val_before_train=False \
     trainer.default_hdfs_dir=null \
     trainer.n_gpus_per_node=$N_GPUS \
@@ -43,4 +47,7 @@ python -m train.verl.run \
     kt.temperature=1.0 \
     kt.max_n_branch_per_token=2 \
     kt.enable_param_scheduler=False \
-    kt.prob_filter_thres=0.1
+    kt.prob_filter_thres=0.1 \
+    kt.offload_to_cpu=False \
+    kt.model_arch=$MODEL_ARCH \
+    2>&1 | tee $EXPERIMENT_NAME.log

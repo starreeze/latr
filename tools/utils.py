@@ -4,7 +4,8 @@ import random
 import re
 import warnings
 from datetime import datetime
-from typing import Iterable, Literal, TypeVar, cast, overload
+from types import UnionType
+from typing import Iterable, Literal, TypeVar, Union, cast, get_args, get_origin, overload
 
 import numpy as np
 import torch
@@ -305,13 +306,35 @@ def transform_to_norm(X: np.ndarray, mu: float, sigma: float) -> np.ndarray:
     return transformed_X
 
 
-def init_dataclass_from_dict(class_type: type[T], args: dict) -> T:
+def init_dataclass_from_dict(class_type: type[T], args: dict, auto_cast: bool = True) -> T:
     """
     Initialize a dataclass from a dictionary.
     non-existing fields will be ignored.
     """
     fields = dataclasses.fields(class_type)  # type: ignore
-    return class_type(**{field.name: args[field.name] for field in fields if field.name in args})
+    d = {}
+    for field in fields:
+        if field.name not in args:
+            continue
+
+        name = field.name
+        value = args[name]
+        if not auto_cast:
+            d[name] = value
+            continue
+
+        _type = field.type
+        # Handle Union types (e.g., int | None). Cast to the first argument type.
+        origin = get_origin(_type)
+        if origin in (Union, UnionType):
+            union_args = get_args(_type)
+            if len(union_args) > 0:
+                _type = union_args[0]
+        if isinstance(_type, type) and value is not None:
+            value = _type(value)  # type: ignore
+        d[name] = value
+
+    return class_type(**d)
 
 
 def encode_latent(latent_token: str, sequence: str) -> str:

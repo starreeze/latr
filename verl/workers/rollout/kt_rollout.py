@@ -1,5 +1,4 @@
-# copyed from verl.workers.rollout.hf_rollout.HFRollout
-import contextlib
+# modified from verl.workers.rollout.hf_rollout.HFRollout
 import copy
 from typing import cast
 
@@ -7,10 +6,11 @@ import torch
 import torch.distributed
 import yaml
 from tensordict import TensorDict
-from torch import nn
-from transformers import AutoTokenizer
 
-from model.generation import KeyTokenGenConfig, KtModules, generate
+from args import ModelArgs
+from model.generation import KeyTokenGenConfig, KeyTokenGenMixin
+from model.loader import load
+from tools.utils import init_dataclass_from_dict
 from verl import DataProto
 from verl.utils.device import get_device_name, get_torch_device
 from verl.utils.torch_functional import get_response_mask
@@ -20,24 +20,36 @@ kt_conf_path = "/dev/shm/kt/config.yaml"
 
 
 class KTRollout(BaseRollout):
-    def __init__(self, module: nn.Module, config):
+    def __init__(self, model_path: str, config):
         super().__init__()
         self.config = config
-        self.module = module
 
         conf_dict = yaml.safe_load(open(kt_conf_path))
-        self.kt_config = KeyTokenGenConfig(**conf_dict["kt"])
-        self.kt_modules = KtModules()
-        self.tokenizer = AutoTokenizer.from_pretrained(conf_dict["path"])
+        self.offload = conf_dict.get("offload_to_cpu", False)
+        self.kt_config = init_dataclass_from_dict(KeyTokenGenConfig, conf_dict)
+
+        _args = ModelArgs(
+            model=model_path,
+            local_files_only=conf_dict.get("local_files_only", False),
+            force_key_token_model=conf_dict["model_arch"],
+            dtype="bfloat16",
+            attention_implementation=conf_dict.get("attention_implementation", "flash_attention_2"),
+        )
+        self.model, self.tokenizer = load(_args)
+        self.model.eval()
+
         self.pad_token_id = cast(int, self.tokenizer.pad_token_id)
         self.eos_token_id = cast(int, self.tokenizer.eos_token_id)
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
+        self.model.to(device=prompts.batch.device)  # type: ignore
         batch_size = prompts.batch.batch_size[0]
         num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
         output = [self._generate_minibatch(p) for p in batch_prompts]
         output = DataProto.concat(output)
+        if self.offload:
+            self.model.to(device="cpu")  # type: ignore
         return output
 
     @torch.no_grad()
@@ -54,21 +66,9 @@ class KTRollout(BaseRollout):
         else:
             config.num_return_sequences = self.config.n
 
-        self.module.eval()
-        param_ctx = contextlib.nullcontext()
-
-        # if isinstance(self.module, FSDP):
-        #     # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
-        #     param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=True)
-        with param_ctx, torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
-            output = generate(
-                self.module,  # type: ignore
-                self.kt_modules,
-                idx,
-                self.tokenizer,
-                attention_mask,
-                config=config,
-            )
+        assert isinstance(self.model, KeyTokenGenMixin)
+        with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
+            output = self.model.generate(idx, self.tokenizer, attention_mask, config=config)
         # TODO: filter out the seq with no answers like ds-chat
         seq = output.sequences
         generated_batch_size = seq.size(0)  # bs * num_return_sequences
@@ -115,5 +115,4 @@ class KTRollout(BaseRollout):
         # empty cache before compute old_log_prob
         get_torch_device().empty_cache()
 
-        self.module.train()
         return DataProto(batch=batch)

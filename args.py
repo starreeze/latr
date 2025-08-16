@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Literal
 
-from model.meta.key_token_gen import KeyTokenGenConfigMixin
+from model.generation import KeyTokenGenConfigMixin
 
 
 @dataclass

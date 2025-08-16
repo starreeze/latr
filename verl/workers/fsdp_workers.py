@@ -584,7 +584,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             from verl.workers.rollout.kt_rollout import KTRollout
             from verl.workers.sharding_manager.base import BaseShardingManager
 
-            rollout = KTRollout(module=self.actor_module_fsdp, config=self.config.rollout)
+            rollout = KTRollout(self.config.model.path, config=self.config.rollout)
             rollout_sharding_manager = BaseShardingManager()
         # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! end modify
 

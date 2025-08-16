@@ -11,11 +11,11 @@ from transformers.hf_argparser import HfArgumentParser
 
 from args import DataArgs, GenerationArgs, ModelArgs, TrainingArgs
 from data import eval as answer_processor
-from data.eval import equal_level
 from data.loader import get_sft_collator
 from data.loader import load as load_datasets
+from data.utils import equal_level
+from model.generation import KeyTokenGenMixin
 from model.loader import load as load_model
-from model.meta.key_token_gen import KeyTokenGenMixin
 from tools.multiprocess import MultiGPUManager, MultiGPUWorker
 from tools.utils import to_device
 

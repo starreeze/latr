@@ -63,7 +63,7 @@ class BranchDynamicParam:
 
 
 @dataclass
-class KeyTokenGenConfig(BranchDynamicParam, GenConfig):
+class KeyTokenGenConfigMixin(BranchDynamicParam):
     output_hidden_states: bool = False
     max_n_branch_per_token: int = 2
     # full: do sample only when branches are full; always: do sample whenever there is only one valid candidate
@@ -74,6 +74,11 @@ class KeyTokenGenConfig(BranchDynamicParam, GenConfig):
     stop_word_filter: bool = False
     model_filter_path: str | None = None
     rollout_filter_steps: list[int] = field(default_factory=lambda: [30, 50])
+
+
+@dataclass
+class KeyTokenGenConfig(KeyTokenGenConfigMixin, GenConfig):
+    pass
 
 
 @dataclass

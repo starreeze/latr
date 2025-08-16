@@ -4,11 +4,9 @@ import sys
 
 import ray
 import yaml
-from transformers.hf_argparser import HfArgumentParser
 
 import verl
 import verl.trainer.main_ppo
-from model.generation import KeyTokenGenConfig
 from train.verl.reward import CountdownMathRewardManager
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
@@ -188,23 +186,24 @@ class TaskRunner:
 
 
 def handle_args():
-    kt_idx, kt_args = [], []
-    path = None
+    kt_idx: list[int] = []
+    kt_args: list[str] = []
     for i, arg in enumerate(sys.argv):
         if arg.startswith("kt."):
             kt_idx.append(i)
-            kt_args.append(f"--{arg[3:]}")
-        elif arg.startswith("actor_rollout_ref.model.path="):
-            path = arg.split("=")[1]
+            kt_args.append(arg[3:])
 
     if not kt_idx:
         print("No KeyTokenGenConfig found, using default model")
         return
 
-    parser = HfArgumentParser([KeyTokenGenConfig])  # type: ignore
-    args: KeyTokenGenConfig = parser.parse_args_into_dataclasses(kt_args)[0]
+    kwargs = {}
+    for arg in kt_args:
+        k, v = arg.split("=")
+        kwargs[k.strip()] = v.strip()
+
     os.makedirs(os.path.dirname(kt_conf_path), exist_ok=True)
-    yaml.dump({"path": path, "kt": args.__dict__}, open(kt_conf_path, "w"))
+    yaml.dump(kwargs, open(kt_conf_path, "w"))
 
     kt_idx.reverse()
     for idx in kt_idx:

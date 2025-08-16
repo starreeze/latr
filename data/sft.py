@@ -7,12 +7,11 @@ from typing import Any, Callable, cast
 import torch
 from datasets import Dataset
 from torch.nn.utils.rnn import pad_sequence
+from transformers.tokenization_utils import PreTrainedTokenizer
 
 from data.base import DataBase
 from data.prompts import PromptFormatter
-from model.meta.base import MetaLatentTokenizer, TokenConstants
-from model.modules.generation import LatentGenConfig
-from tools.utils import find_values, get_latent_backbone
+from tools.utils import find_values
 
 
 def filter_coco_stage_data(
@@ -177,7 +176,7 @@ class SFTCollator(ABC):
 
     def __init__(
         self,
-        tokenizer: MetaLatentTokenizer,
+        tokenizer: PreTrainedTokenizer,
         align_label_with_tf_mask=True,
         keep_original_data=False,
         cot_type="none",
@@ -193,9 +192,6 @@ class SFTCollator(ABC):
         self.eos_token_id = cast(int, tokenizer.eos_token_id)
         self.pad_token_id = cast(int, tokenizer.pad_token_id)
         self.align_label_with_tf_mask = align_label_with_tf_mask
-        self.start_latent_id, self.end_latent_id, self.latent_id = cast(
-            list[int], tokenizer.convert_tokens_to_ids(TokenConstants.latent_tokens)
-        )
         self.keep_original_data = keep_original_data
         self.cot_type = cot_type
         self.template = template
@@ -204,7 +200,7 @@ class SFTCollator(ABC):
         self.latent_model = latent_model
         self.n_repeat = n_repeat
 
-        tok_bb_name = get_latent_backbone(tokenizer).__name__.lower()
+        tok_bb_name = tokenizer.__class__.__name__.lower()
         for t in self.all_answer_prefix.keys():
             if t in tok_bb_name:
                 self.answer_prefix = self.all_answer_prefix[t]
@@ -330,7 +326,7 @@ class SFTCollator(ABC):
 
 
 class ExplicitSFTCollator(SFTCollator):
-    def __init__(self, tokenizer: MetaLatentTokenizer, align_label_with_tf_mask=True, **kwargs) -> None:
+    def __init__(self, tokenizer: PreTrainedTokenizer, align_label_with_tf_mask=True, **kwargs) -> None:
         super().__init__(tokenizer, align_label_with_tf_mask, **kwargs)
 
     def _construct_ans_str(self, cot: list[str], answer: str, difficulty: float) -> str:
@@ -348,152 +344,3 @@ class ExplicitSFTCollator(SFTCollator):
         self, tokens: torch.Tensor, labels: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return labels, None
-
-
-class InterleaveSFTCollator(SFTCollator):
-    def __init__(
-        self, tokenizer: MetaLatentTokenizer, align_label_with_tf_mask=True, tf_interval=1, **kwargs
-    ) -> None:
-        # if tf_interval is 1, it collapses to the Explicit cot
-        super().__init__(tokenizer, align_label_with_tf_mask, **kwargs)
-        self.tf_interval = tf_interval
-        raise NotImplementedError("InterleaveSFTCollator is not implemented")
-        assert self.cot_type == "latent"
-
-    @staticmethod
-    def _construct_ans_str(cot: list[str], answer: str, difficulty: float) -> str:
-        cot_str = " ".join(cot)
-        return f"{TokenConstants.latent_tokens[0]}{cot_str}{TokenConstants.latent_tokens[1]}{answer}"
-
-    def _process_tf_and_label(
-        self, tokens: torch.Tensor, labels: torch.Tensor, ignore_idx=-100
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Creates the teacher forcing mask and modify labels for supervision for a single token sequence."""
-        all_len = len(tokens)
-        tf_mask = torch.ones_like(tokens, dtype=torch.long)  # Ensure dtype is long
-        new_labels = labels.clone()
-
-        in_latent_block = False
-        current_block_start_idx = -1
-        for i in range(all_len):
-            token_id = tokens[i].item()  # Get the integer value of the token
-
-            if token_id == self.start_latent_id:
-                if in_latent_block:
-                    raise ValueError(
-                        f"Found nested start_latent_id or missing end_latent_id at index {i} in token sequence: {tokens.tolist()}"
-                    )
-                in_latent_block = True
-                current_block_start_idx = i
-                # tf_mask[i] remains 1 (initialized as 1)
-
-            elif token_id == self.end_latent_id:
-                if not in_latent_block:
-                    raise ValueError(
-                        f"Found end_latent_id without matching start_latent_id at index {i} in token sequence: {tokens.tolist()}"
-                    )
-
-                start_idx = current_block_start_idx
-                end_idx = i
-
-                # set mask to 0 for the latent block (excluding start and end tokens)
-                tf_mask[start_idx + 1 : end_idx] = 0
-                new_labels[start_idx + 1 : end_idx] = ignore_idx
-
-                # Iterate backwards from the end token (since it must be supervised)
-                # down to the token after the start token
-                for j in range(end_idx, start_idx, -self.tf_interval):
-                    tf_mask[j] = 1
-                    new_labels[j] = labels[j]
-
-                in_latent_block = False
-                current_block_start_idx = -1
-
-        # Final check after loop
-        if in_latent_block:
-            raise ValueError(
-                f"Token sequence ended with an unclosed latent block starting at index {current_block_start_idx}: {tokens.tolist()}"
-            )
-
-        return tf_mask, new_labels
-
-    def _update_labels_tf_mask(
-        self, tokens: torch.Tensor, labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        tf_mask, new_labels = self._process_tf_and_label(tokens, labels)
-        if self.align_label_with_tf_mask:
-            labels = new_labels
-        return labels, tf_mask
-
-
-class CocoSFTCollator(SFTCollator):
-    def __init__(
-        self,
-        tokenizer: MetaLatentTokenizer,
-        latent_type: str,
-        sft_latent_supervision="none",
-        align_label_with_tf_mask=True,
-        coco_sft_min_latent=1,
-        coco_sft_max_latent=4,
-        coco_num_latent_per_step=1,
-        current_step=-1,
-        stage_overflow_strategy="keep",
-        **kwargs,
-    ) -> None:
-        super().__init__(tokenizer, align_label_with_tf_mask, **kwargs)
-        self.enforce_preplan = latent_type == "enforce"
-        self.sft_latent_supervision = sft_latent_supervision
-        self.min_latent = coco_sft_min_latent
-        self.max_latent = coco_sft_max_latent
-        self.coco_num_latent_per_step = coco_num_latent_per_step
-        self.current_step = current_step
-        assert stage_overflow_strategy in ["truncate", "keep"]
-        self.overflow_strategy = stage_overflow_strategy
-
-    def _update_labels_tf_mask(
-        self, tokens: torch.Tensor, labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        tf_mask = torch.ones_like(labels, dtype=torch.long)
-        tf_mask[labels == self.latent_id] = 0
-        if self.align_label_with_tf_mask:
-            labels[tf_mask == 0] = -100
-        # for start and end tokens, they should be masked out according to model config in forward pass
-        return labels, tf_mask
-
-    def _get_none_supervision_reasoning_str(self, cot: list[str], difficulty: float) -> str:
-        assert 0 <= difficulty <= 1
-        num_latent = self.min_latent + round(difficulty * (self.max_latent - self.min_latent))
-        reasoning_str = (
-            TokenConstants.latent_tokens[0]
-            + "".join([TokenConstants.latent_tokens[2]] * num_latent)
-            + TokenConstants.latent_tokens[1]
-        )
-        if self.enforce_preplan:
-            reasoning_str = LatentGenConfig.preplan_template.format(num_steps=num_latent) + reasoning_str
-        return reasoning_str
-
-    def _get_coco_supervision_reasoning_str(self, cot: list[str], difficulty: float) -> str:
-        step = self.current_step if 0 <= self.current_step < len(cot) else len(cot)
-        reasoning_str = (
-            TokenConstants.latent_tokens[0]
-            + "".join([TokenConstants.latent_tokens[2]] * self.coco_num_latent_per_step * step)
-            + TokenConstants.latent_tokens[1]
-            + "".join(cot[step:] if self.overflow_strategy == "keep" else [])
-        )
-        if self.enforce_preplan:
-            reasoning_str = LatentGenConfig.preplan_template.format(num_steps=len(cot)) + reasoning_str
-        return reasoning_str
-
-    def _construct_ans_str(self, cot: list[str], answer: str, difficulty: float) -> str:
-        reasoning_str = getattr(self, f"_get_{self.sft_latent_supervision}_supervision_reasoning_str")(
-            cot, difficulty
-        )
-        if self.cot_type == "plain":
-            return reasoning_str + rf" $\boxed{{{answer}}}$"
-        elif self.cot_type == "xml":
-            return f"<think>\n{reasoning_str}\n</think>\n<answer>\n{answer}\n</answer>"
-        else:
-            raise ValueError(f"Invalid cot_type: {self.cot_type} for coco SFT")
-
-
-DynamicSFTCollator = EnforceSFTCollator = CocoSFTCollator

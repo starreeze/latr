@@ -38,7 +38,7 @@ python -m data.diverge --model /home/nfs04/model/Qwen2.5/Qwen2.5-1.5B-Instruct -
 ### train
 
 ```bash
-python -m train.diverge --load_path /home/xingsy/data_91/model/Qwen3-Embedding-0.6B --per_device_train_batch_size 32 --learning_rate 1e-5 --run_name divergence-train
+bash scripts/diverge.sh
 ```
 
 ### eval
