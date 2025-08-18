@@ -43,6 +43,7 @@ class HFRollout(BaseRollout):
         self.module = module
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
+        raise NotImplementedError("HFRollout is no longer supported.")
         batch_size = prompts.batch.batch_size[0]
         num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
@@ -59,14 +60,13 @@ class HFRollout(BaseRollout):
         temperature = prompts.meta_info.get("temperature", self.config.temperature)
         response_length = prompts.meta_info.get("response_length", self.config.response_length)
         top_p = prompts.meta_info.get("top_p", self.config.get("top_p", 1.0))
-        top_k = max(0, prompts.meta_info.get("top_k", self.config.get("top_k", 0)))  # to be compatible with vllm
+        top_k = max(
+            0, prompts.meta_info.get("top_k", self.config.get("top_k", 0))
+        )  # to be compatible with vllm
 
         if not do_sample:
             # do_sample==False -> greedy decoding
-            kwargs = {
-                "do_sample": False,
-                "num_beams": 1,
-            }
+            kwargs = {"do_sample": False, "num_beams": 1}
         elif is_validate:
             # do validate and do sample -> use val_kwargs
             kwargs = {
@@ -75,7 +75,6 @@ class HFRollout(BaseRollout):
                 "top_k": max(0, self.config.val_kwargs.top_k),  # to be compatible with vllm
                 "top_p": self.config.val_kwargs.top_p,
                 "temperature": self.config.val_kwargs.temperature,
-                "num_return_sequences": 1,  # if validate, already repeat in ray_trainer
             }
         else:
             # do_sample -> use rollout config
@@ -85,7 +84,6 @@ class HFRollout(BaseRollout):
                 "top_p": top_p,
                 "top_k": top_k,
                 "temperature": temperature,
-                "num_return_sequences": self.config.n,
             }
 
         # make config according to generate mode
@@ -99,13 +97,15 @@ class HFRollout(BaseRollout):
         # used to construct attention_mask
         eos_token_id = prompts.meta_info["eos_token_id"]
         pad_token_id = prompts.meta_info["pad_token_id"]
+        if pad_token_id is None:
+            pad_token_id = eos_token_id
 
         self.module.eval()
         param_ctx = contextlib.nullcontext()
 
         if isinstance(self.module, FSDP):
             # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
-            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=True)
         with param_ctx, torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             output = self.module.generate(
                 input_ids=idx,
@@ -131,16 +131,12 @@ class HFRollout(BaseRollout):
         delta_length = sequence_length - seq.shape[1]
 
         if delta_length > 0:
-            delta_tokens = torch.ones(size=(generated_batch_size, delta_length), device=seq.device, dtype=seq.dtype)
+            delta_tokens = torch.ones(
+                size=(generated_batch_size, delta_length), device=seq.device, dtype=seq.dtype
+            )
             delta_tokens = pad_token_id * delta_tokens
             seq = torch.cat((seq, delta_tokens), dim=1)
         assert seq.shape[1] == sequence_length
-
-        # make necessary reputations if num_return_sequences > 1
-        num_return_sequences = kwargs.get("num_return_sequences", 1)
-        if num_return_sequences > 1:
-            position_ids = position_ids.repeat_interleave(num_return_sequences, dim=0)
-            attention_mask = attention_mask.repeat_interleave(num_return_sequences, dim=0)
 
         prompt = seq[:, :prompt_length]  # (generated_batch_size, prompt_length)
         response = seq[:, prompt_length:]  # (generated_batch_size, response_length)

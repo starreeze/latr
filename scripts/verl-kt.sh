@@ -1,4 +1,4 @@
-DATA_DIR=dataset/countdown
+DATA_DIR=dataset/countdown-base
 BASE_MODEL=/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B
 N_GPUS=8
 EXPERIMENT_NAME=kt-qwen2.5-3b-countdown
@@ -10,13 +10,15 @@ python -m train.verl.run \
     data.train_batch_size=256 \
     data.max_prompt_length=256 \
     data.max_response_length=1024 \
+    data.dataloader_num_workers=0 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=False \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=0.001 \
+    actor_rollout_ref.actor.clip_ratio=0.15 \
+    actor_rollout_ref.actor.kl_loss_coef=0.01 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.shuffle=True \
     +actor_rollout_ref.actor.data_loader_seed=42 \
@@ -25,13 +27,14 @@ python -m train.verl.run \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
-    +actor_rollout_ref.rollout.micro_batch_size=256 \
     actor_rollout_ref.rollout.name=kt \
     actor_rollout_ref.rollout.n=8 \
+    +actor_rollout_ref.rollout.micro_batch_size=256 \
+    +actor_rollout_ref.rollout.unshard_fsdp_params=False \
+    +actor_rollout_ref.rollout.offload_to_cpu=False \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.adv_estimator=grpo \
-    algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
     trainer.total_epochs=1 \
@@ -48,6 +51,5 @@ python -m train.verl.run \
     kt.max_n_branch_per_token=2 \
     kt.enable_param_scheduler=False \
     kt.prob_filter_thres=0.1 \
-    kt.offload_to_cpu=False \
     kt.model_arch=$MODEL_ARCH \
     2>&1 | tee $EXPERIMENT_NAME.log

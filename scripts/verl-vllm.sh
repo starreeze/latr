@@ -1,7 +1,7 @@
-DATA_DIR=dataset/countdown
+DATA_DIR=dataset/countdown-base
 BASE_MODEL=/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B
 N_GPUS=8
-EXPERIMENT_NAME=orig-qwen2.5-3b-countdown
+EXPERIMENT_NAME=vllm-qwen2.5-3b-countdown
 
 python -m train.verl.run \
     data.train_files=$DATA_DIR/train.parquet \
@@ -9,6 +9,7 @@ python -m train.verl.run \
     data.train_batch_size=256 \
     data.max_prompt_length=256 \
     data.max_response_length=1024 \
+    data.dataloader_num_workers=0 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
@@ -17,6 +18,8 @@ python -m train.verl.run \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.shuffle=True \
+    +actor_rollout_ref.actor.data_loader_seed=42 \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.model.use_liger=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \

@@ -1,10 +1,10 @@
-trl==0.17.0
+# trl==0.17.0
 verl==0.5.0
-vllm
+vllm==0.10.0
 natsort
 rich
 wandb
 func_timeout
 nltk
 rouge_score
-latex2sympy2_extended[antlr4_11_0]
+transformers==4.53.0

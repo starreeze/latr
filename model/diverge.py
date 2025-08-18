@@ -154,10 +154,11 @@ class DivJudge(nn.Module):
             Divergence probabilities [batch_size]
             Loss (if labels are provided)
         """
-        outputs = self.backbone(
-            input_ids=input_ids[:, -self.max_prefix_len :],
-            attention_mask=attention_mask[:, -self.max_prefix_len :],
-        )
+        input_ids = input_ids[:, -self.max_prefix_len :]
+        attention_mask = attention_mask[:, -self.max_prefix_len :]
+        if torch.any(input_ids >= self.tokenizer.vocab_size):
+            breakpoint()
+        outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
         final_embeddings = outputs.last_hidden_state[:, -1]
 
         # Get probability through linear regressor + sigmoid

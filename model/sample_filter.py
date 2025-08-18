@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
@@ -151,6 +152,13 @@ class BranchInfo:
         """Return the number of branches that have the same root."""
         root_branch = self.branches[self.branches[id].root]
         return len(root_branch.children) + 1
+
+    def get_root_branches_repr(self, max_n_display=8) -> str:
+        groups = self.group_by_root()
+        nums = [len(groups[rid]) for rid in sorted(groups.keys())]
+        if len(nums) > max_n_display:
+            nums = [f"{n}x{c}" for n, c in Counter(nums).most_common(max_n_display)]
+        return "[" + ",".join(str(n) for n in nums) + "]"
 
     def remove(
         self,

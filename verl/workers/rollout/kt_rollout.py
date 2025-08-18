@@ -6,13 +6,15 @@ import torch
 import torch.distributed
 import yaml
 from tensordict import TensorDict
+from torch import nn
+from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from args import ModelArgs
-from model.generation import KeyTokenGenConfig, KeyTokenGenMixin
-from model.loader import load
+from model.generation import KeyTokenGenConfig, KtModules, generate
 from tools.utils import init_dataclass_from_dict
 from verl import DataProto
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_device_name
 from verl.utils.torch_functional import get_response_mask
 from verl.workers.rollout.base import BaseRollout
 
@@ -20,36 +22,69 @@ kt_conf_path = "/dev/shm/kt/config.yaml"
 
 
 class KTRollout(BaseRollout):
-    def __init__(self, model_path: str, config):
+    def __init__(self, module: nn.Module, path: str, config):
         super().__init__()
         self.config = config
+        self.module = module
+        self.path = path
+        self.unshard_fsdp_params = config.get("unshard_fsdp_params", False) and isinstance(module, FSDP)
+
+        if self.unshard_fsdp_params:
+            print("unsharding fsdp params for inference.")
+            self.infer_module: nn.Module = AutoModelForCausalLM.from_pretrained(
+                self.path,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+                trust_remote_code=True,
+            )
+            # Apply LoRA to inference module if actor used LoRA
+            model_cfg = getattr(self.config, "model", None)
+            if model_cfg is not None and getattr(model_cfg, "lora_rank", 0) > 0:
+                raise NotImplementedError("LoRA is not supported for inference yet.")
+        else:
+            print("using fsdp module for inference.")
+            self.infer_module = module
 
         conf_dict = yaml.safe_load(open(kt_conf_path))
-        self.offload = conf_dict.get("offload_to_cpu", False)
         self.kt_config = init_dataclass_from_dict(KeyTokenGenConfig, conf_dict)
+        # if fsdp is not unsharded, we need to sync gpus to avoid desynchornize in generation
+        self.kt_config.sync_gpus = not self.unshard_fsdp_params
 
-        _args = ModelArgs(
-            model=model_path,
-            local_files_only=conf_dict.get("local_files_only", False),
-            force_key_token_model=conf_dict["model_arch"],
-            dtype="bfloat16",
-            attention_implementation=conf_dict.get("attention_implementation", "flash_attention_2"),
-        )
-        self.model, self.tokenizer = load(_args)
-        self.model.eval()
+        self.tokenizer = AutoTokenizer.from_pretrained(path)
+        self.kt_modules = KtModules()
 
         self.pad_token_id = cast(int, self.tokenizer.pad_token_id)
         self.eos_token_id = cast(int, self.tokenizer.eos_token_id)
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
-        self.model.to(device=prompts.batch.device)  # type: ignore
         batch_size = prompts.batch.batch_size[0]
         num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
-        output = [self._generate_minibatch(p) for p in batch_prompts]
+
+        if self.unshard_fsdp_params:
+            # Export a full (unsharded) state dict from FSDP and load into a separate inference module
+            with FSDP.state_dict_type(
+                self.module,
+                StateDictType.FULL_STATE_DICT,
+                FullStateDictConfig(offload_to_cpu=True, rank0_only=False),
+            ):
+                full_state_dict = self.module.state_dict()
+            # Be robust to minor key mismatches (e.g., LoRA/adapters)
+            self.infer_module.load_state_dict(full_state_dict, strict=False)
+
+        self.infer_module.eval()
+        # Ensure inference module on correct device once per call
+        if self.unshard_fsdp_params and len(batch_prompts) > 0:
+            sample_idx = batch_prompts[0].batch["input_ids"].device
+            self.infer_module.to(device=sample_idx)
+        with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
+            output = [self._generate_minibatch(p) for p in batch_prompts]
+        if self.unshard_fsdp_params:
+            self.infer_module.to("cpu")
+
         output = DataProto.concat(output)
-        if self.offload:
-            self.model.to(device="cpu")  # type: ignore
+        # Restore training mode for the training module only
+        self.module.train()
         return output
 
     @torch.no_grad()
@@ -66,9 +101,14 @@ class KTRollout(BaseRollout):
         else:
             config.num_return_sequences = self.config.n
 
-        assert isinstance(self.model, KeyTokenGenMixin)
-        with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
-            output = self.model.generate(idx, self.tokenizer, attention_mask, config=config)
+        output = generate(
+            self.infer_module,  # type: ignore
+            self.kt_modules,
+            idx,
+            self.tokenizer,
+            attention_mask,
+            config=config,
+        )
         # TODO: filter out the seq with no answers like ds-chat
         seq = output.sequences
         generated_batch_size = seq.size(0)  # bs * num_return_sequences
@@ -111,8 +151,5 @@ class KTRollout(BaseRollout):
             },
             batch_size=generated_batch_size,
         )
-
-        # empty cache before compute old_log_prob
-        get_torch_device().empty_cache()
 
         return DataProto(batch=batch)

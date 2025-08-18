@@ -51,7 +51,7 @@ class BranchDynamicParam:
     model_filter_rollout_thres: float | None = None  # the higher the more loose
 
     # param scheduler
-    enable_param_scheduler: bool = True
+    enable_param_scheduler: bool = False
     param_scheduler_step: float = 0.01  # strength for each step
     max_n_step: int = 10  # max number of steps allowed for dynamic tuning
     # step up (strict) the scheduler when the suppress ratio (n_suppressed / seq_len for each branch)
@@ -69,6 +69,8 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     # full: do sample only when branches are full; always: do sample whenever there is only one valid candidate
     sample_nk: Literal["none", "full", "always"] = "full"
     fill_return_sequences: bool = True
+    kt_fallback: bool = False
+    sync_gpus: bool = False
 
     # filters
     stop_word_filter: bool = False
@@ -234,6 +236,18 @@ class KeyTokenGenMixin:
         config: KeyTokenGenConfig | None = None,
         **kwargs,
     ) -> GenerateKeyTokenOutput:
+        if kwargs.get("kt_fallback", False) or config and config.kt_fallback:
+            keys = ["temperature", "top_k", "top_p", "do_sample", "max_new_tokens"]
+            args_dict = config.__dict__ | kwargs
+            args = {k: args_dict[k] for k in keys if k in args_dict}
+            res = super().generate(  # type: ignore
+                input_ids,
+                attention_mask=attention_mask,
+                stopping_criteria=stopping_criteria,
+                use_cache=True,
+                **args,
+            )
+            return GenerateKeyTokenOutput(cast(torch.LongTensor, res))
         return generate(
             self,  # type: ignore
             self.kt_modules,
@@ -258,8 +272,9 @@ def _sample_new_sequence_with_rollout(
     sample_nk: Literal["none", "full", "always"],
     branch_info: BranchInfo,
     current_step: int,
-    start: int,
+    input_len: int,
     eos_id: int,
+    sync_gpus: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, DynamicCache | None]:
     """
     Unified batched sampling and branching across all roots.
@@ -275,9 +290,15 @@ def _sample_new_sequence_with_rollout(
     # 2) Build variable-length prefix-trimmed sequences for valid (non-complete) rows
     valid_rows = torch.nonzero(~complete_mask, as_tuple=False).squeeze(-1)
     valid_counts = int(valid_rows.numel())
-    assert valid_counts, "All sequences are already completed"
+    if not valid_counts:
+        assert sync_gpus, "All sequences are already completed"
+        pad_tensor = torch.full((batch_size, 1), eos_id, device=device, dtype=current_ids.dtype)
+        current_ids = torch.cat([current_ids, pad_tensor], dim=1)
+        ones_col = torch.ones((batch_size, 1), device=device, dtype=attention_mask.dtype)
+        attention_mask = torch.cat([attention_mask, ones_col], dim=1)
+        return current_ids, attention_mask, cache
 
-    global_valid_ids = current_ids[valid_rows, start:]
+    global_valid_ids = current_ids[valid_rows, input_len:]
     global_valid_topk_ids = topk_ids[valid_rows]
     global_valid_topk_probs = topk_probs[valid_rows]
     global_valid_masks = key_token_filters(global_valid_ids, global_valid_topk_ids, global_valid_topk_probs)
@@ -517,6 +538,7 @@ def generate(
             step,
             input_len,
             eos_id,
+            config.sync_gpus,
         )
 
         # Rollout filtering
@@ -539,12 +561,10 @@ def generate(
 
         if isinstance(wrapped_range, tqdm):
             all_suppressed = sum(b.suppressed_num for b in branch_info)
-            # Number of branches per root (by stable root ids)
-            groups = branch_info.group_by_root()
             wrapped_range.set_postfix(
-                suppressed=all_suppressed, branches=[len(groups[rid]) for rid in sorted(groups.keys())]
+                suppressed=all_suppressed, branches=branch_info.get_root_branches_repr()
             )
-        if all_done:
+        if all_done and not config.sync_gpus:
             break
 
     # Step scheduler

@@ -21,10 +21,8 @@ default model is qwen3-1.7b-base and dataset is countdown.
 
 ### evaluation
 
-#### eval explicit cot
-
 ```bash
-python -m tools.eval --model /home/xingsy/data_91/model/Qwen3-1.7B --eval_dataset aime --do_sample --temperature 0.6 --top_k 20 --top_p 0.95 --cot_type plain --max_think_tokens 7500 --max_new_tokens 8192 --enable_latent false [--system_prompt_type none] --n_gpus 8 --generate_batch_size 16
+python -m tools.diversity --model Qwen/Qwen3-1.7B [--force_key_token_model qwen3] --eval_dataset aime --do_sample --temperature 0.6 --top_k 20 --top_p 0.95 --cot_type plain --max_new_tokens 7000 --enable_latent false --n_gpus 8 --generate_batch_size 2 --num_return_sequences 12
 ```
 
 ## the divergence model
@@ -41,9 +39,24 @@ python -m data.diverge --model /home/nfs04/model/Qwen2.5/Qwen2.5-1.5B-Instruct -
 bash scripts/diverge.sh
 ```
 
-### eval
+## Run RL
 
-# Contributing
+### Data
+
+```bash
+python -m data.countdown_gen --src SRC --dst DST --template_type TEMPLATE_TYPE
+```
+
+- src: the source dataset name or a local path, default to `Jiayi-Pan/Countdown-Tasks-3to4`
+- dst: the destination path to save the verl-ready dataset, default to `dataset/countdown`
+- template_type: the template type (`base`, `qwen-instruct`), default to `base`
+
+### Train
+
+scripts are provided in `scripts`.
+
+
+## Contributing
 
 Fork and open a pull request. Follow the instructions below or your PR will fail.
 

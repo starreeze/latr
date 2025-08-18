@@ -1,6 +1,7 @@
 import re
 
 import torch
+
 from verl import DataProto
 from verl.utils.reward_score import gsm8k, math
 from verl.workers.reward_manager.registry import register
@@ -27,7 +28,7 @@ class CountdownMathRewardManager:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
 
-    def __call__(self, data: DataProto, **kwargs):
+    def __call__(self, data: DataProto, return_dict=False, **kwargs):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
@@ -72,7 +73,7 @@ class CountdownMathRewardManager:
                 already_print_data_sources[data_source] += 1
                 print(sequences_str)
 
-        return reward_tensor
+        return reward_tensor if not return_dict else {"reward_tensor": reward_tensor}
 
 
 # the following is copied from https://github.com/Jiayi-Pan/TinyZero/blob/main/verl/utils/reward_score/countdown.py
