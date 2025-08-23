@@ -20,7 +20,7 @@ class DivCollator:
         self.tokenizer = tokenizer
         self.dtype = dtype
 
-    def __call__(self, batch: list[dict[str, Tensor]]) -> dict[str, Tensor | None]:
+    def process_tensors(self, batch: list[dict[str, Tensor]]) -> dict[str, Tensor | None]:
         "prefix, a, b, label -> input_ids, attention_mask, labels"
 
         # Create formatted sequences: prefix + " ## " + a + " ## " + b
@@ -57,6 +57,31 @@ class DivCollator:
             attention_mask[i, -seq_len:] = 1
 
         return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+    def process_texts(self, batch: list[dict[str, str]]) -> dict[str, Tensor | None]:
+        texts = [
+            (
+                f"<prefix>{sample['prefix']}</prefix> "
+                f"<candidate_1>{sample['a']}</candidate_1> "
+                f"<candidate_2>{sample['b']}</candidate_2>"
+            )
+            .replace("<think>", "")
+            .replace("</think>", "")
+            for sample in batch
+        ]
+        if batch[0].get("label", None) is not None:
+            labels = torch.tensor([sample.get("label", None) for sample in batch], dtype=self.dtype)
+        else:
+            labels = None
+        input_ids = self.tokenizer(texts, return_tensors="pt", padding=True, padding_side="left").input_ids
+        attention_mask = input_ids != self.tokenizer.pad_token_id
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+    def __call__(self, batch: list[dict]) -> dict[str, Tensor | None]:
+        if isinstance(batch[0]["prefix"], str):
+            return self.process_texts(batch)
+        else:
+            return self.process_tensors(batch)
 
 
 @dataclass
@@ -112,7 +137,7 @@ class DivJudge(nn.Module):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.regressor = nn.Sequential(
-            nn.BatchNorm1d(self.backbone.config.hidden_size),
+            nn.LayerNorm(self.backbone.config.hidden_size),
             nn.Dropout(0.1),
             nn.Linear(self.backbone.config.hidden_size, 1, dtype=torch_dtype),
         )
@@ -156,8 +181,7 @@ class DivJudge(nn.Module):
         """
         input_ids = input_ids[:, -self.max_prefix_len :]
         attention_mask = attention_mask[:, -self.max_prefix_len :]
-        if torch.any(input_ids >= self.tokenizer.vocab_size):
-            breakpoint()
+        input_ids[input_ids >= self.tokenizer.vocab_size] = self.tokenizer.pad_token_id
         outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
         final_embeddings = outputs.last_hidden_state[:, -1]
 

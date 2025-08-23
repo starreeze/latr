@@ -324,14 +324,19 @@ def init_dataclass_from_dict(class_type: type[T], args: dict, auto_cast: bool = 
             continue
 
         _type = field.type
+        if isinstance(_type, str):
+            _type = eval(_type)
         # Handle Union types (e.g., int | None). Cast to the first argument type.
         origin = get_origin(_type)
         if origin in (Union, UnionType):
             union_args = get_args(_type)
             if len(union_args) > 0:
                 _type = union_args[0]
-        if isinstance(_type, type) and value is not None:
-            value = _type(value)  # type: ignore
+        if value is not None:
+            try:
+                value = _type(value)
+            except Exception:
+                pass
         d[name] = value
 
     return class_type(**d)

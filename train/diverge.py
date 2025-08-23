@@ -22,7 +22,7 @@ class DivergenceArgs:
 
 def compute_metrics(preds: torch.Tensor, labels: torch.Tensor) -> dict[str, float]:
     return {
-        "accuracy": (torch.abs(preds - labels) < 0.25).float().mean().item(),
+        "accuracy": (torch.abs(preds - labels) < 0.5).float().mean().item(),
         "mae": torch.abs(preds - labels).mean().item(),
         "preds_mean": preds.mean().item(),
         "labels_mean": labels.mean().item(),  # type: ignore

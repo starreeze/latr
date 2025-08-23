@@ -1,4 +1,5 @@
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
+from itertools import product
 from typing import Literal, cast
 
 import torch
@@ -11,209 +12,22 @@ from transformers.generation.logits_process import (
     TopPLogitsWarper,
 )
 from transformers.generation.stopping_criteria import EosTokenCriteria, StoppingCriteriaList
-from transformers.generation.utils import GenerateDecoderOnlyOutput
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from model.diverge import DivJudge
-from model.sample_filter import (
+from model.sample_filter import KeyTokenFilterList, ModelFilter, RolloutFilter, create_key_token_filter
+from model.utils import GenConfig  # noqa: F401
+from model.utils import (
     Branch,
     BranchInfo,
-    KeyTokenFilterList,
-    ModelFilter,
-    RolloutFilter,
-    create_key_token_filter,
+    BranchParamScheduler,
+    GenerateKeyTokenOutput,
+    KeyTokenGenConfig,
+    concatenate_caches,
+    duplicate_cache_for_sequence,
 )
 from tools.utils import get_repeat_interleave, init_dataclass_from_dict
-
-
-@dataclass
-class GenConfig:
-    max_new_tokens: int = 4096
-    temperature: float = 0.2
-    top_k: int | None = None
-    top_p: float = 1
-    do_sample: bool = True
-    use_cache: bool = True
-    compile_generation: bool = False
-    cache_implementation: Literal["dynamic", "static"] = "static"
-    progress_bar: bool = True
-    num_return_sequences: int = 1
-
-
-@dataclass
-class BranchDynamicParam:
-    # dynamic filter params
-    prob_filter_thres: float | None = 0.2
-    similarity_filter_thres: float | None = None
-    rollout_filter_edit_dist_thres: float = 0.4
-    model_filter_cand_thres: float | None = None  # the higher the more loose
-    model_filter_rollout_thres: float | None = None  # the higher the more loose
-
-    # param scheduler
-    enable_param_scheduler: bool = False
-    param_scheduler_step: float = 0.01  # strength for each step
-    max_n_step: int = 10  # max number of steps allowed for dynamic tuning
-    # step up (strict) the scheduler when the suppress ratio (n_suppressed / seq_len for each branch)
-    # is greater than this threshold
-    suppress_ratio_thres: float = 0.1
-    # step down (loose) the scheduler when the empty branch ratio (n_empty / (n_gen * batch))
-    # is greater than this threshold
-    empty_branch_ratio_thres: float = 0.05
-
-
-@dataclass
-class KeyTokenGenConfigMixin(BranchDynamicParam):
-    output_hidden_states: bool = False
-    max_n_branch_per_token: int = 2
-    # full: do sample only when branches are full; always: do sample whenever there is only one valid candidate
-    sample_nk: Literal["none", "full", "always"] = "full"
-    fill_return_sequences: bool = True
-    kt_fallback: bool = False
-    sync_gpus: bool = False
-
-    # filters
-    stop_word_filter: bool = False
-    model_filter_path: str | None = None
-    rollout_filter_steps: list[int] = field(default_factory=lambda: [30, 50])
-
-
-@dataclass
-class KeyTokenGenConfig(KeyTokenGenConfigMixin, GenConfig):
-    pass
-
-
-@dataclass
-class BranchParamScheduler(BranchDynamicParam):
-    adjusted_steps: int = 0
-
-    def _step_up(self):  # more strict
-        if self.adjusted_steps >= self.max_n_step:
-            return
-        self.adjusted_steps += 1
-
-        if self.prob_filter_thres is not None:
-            self.prob_filter_thres += self.param_scheduler_step
-        if self.similarity_filter_thres is not None:
-            self.similarity_filter_thres -= self.param_scheduler_step
-        if self.rollout_filter_edit_dist_thres is not None:
-            self.rollout_filter_edit_dist_thres += self.param_scheduler_step
-        if self.model_filter_cand_thres is not None:
-            self.model_filter_cand_thres -= self.param_scheduler_step
-        if self.model_filter_rollout_thres is not None:
-            self.model_filter_rollout_thres -= self.param_scheduler_step
-
-    def _step_down(self):  # more loose
-        if self.adjusted_steps <= -self.max_n_step:
-            return
-        self.adjusted_steps -= 1
-
-        if self.prob_filter_thres is not None:
-            self.prob_filter_thres -= self.param_scheduler_step
-        if self.similarity_filter_thres is not None:
-            self.similarity_filter_thres += self.param_scheduler_step
-        if self.rollout_filter_edit_dist_thres is not None:
-            self.rollout_filter_edit_dist_thres -= self.param_scheduler_step
-        if self.model_filter_cand_thres is not None:
-            self.model_filter_cand_thres += self.param_scheduler_step
-        if self.model_filter_rollout_thres is not None:
-            self.model_filter_rollout_thres += self.param_scheduler_step
-
-    def step(self, suppress_ratio: float, empty_branch_ratio: float):
-        if self.enable_param_scheduler:
-            if suppress_ratio > self.suppress_ratio_thres:
-                self._step_up()
-            if empty_branch_ratio > self.empty_branch_ratio_thres:
-                self._step_down()
-        return self
-
-
-@dataclass
-class GenerateKeyTokenOutput(GenerateDecoderOnlyOutput):
-    num_suppressed_branches: int | None = None
-    branch_info: BranchInfo | None = None
-    scheduler: BranchParamScheduler | None = None
-    suppress_ratio: float | None = None
-    empty_branch_ratio: float | None = None
-    num_seq: int | None = None
-
-
-def _duplicate_cache_for_sequence(cache: DynamicCache | None, source_idx: int) -> DynamicCache | None:
-    """
-    Helper function to duplicate a single sequence's cache state from a DynamicCache.
-
-    Args:
-        cache: The cache to duplicate from, or None
-        source_idx: The index of the source sequence in the batch
-
-    Returns:
-        A cache containing only the specified sequence's state, or None if input was None
-    """
-    if cache is None:
-        return None
-
-    # Create a new DynamicCache instance
-    new_cache = DynamicCache()
-    new_cache.key_cache = []
-    new_cache.value_cache = []
-
-    # Extract the cache for the specific sequence
-    for layer_idx in range(len(cache.key_cache)):
-        if cache.key_cache[layer_idx] is not None:
-            # Extract only the source sequence: (batch, heads, seq, dim) -> (1, heads, seq, dim)
-            key_tensor = cache.key_cache[layer_idx][source_idx : source_idx + 1]
-            new_cache.key_cache.append(key_tensor)
-
-        if cache.value_cache[layer_idx] is not None:
-            # Extract only the source sequence: (batch, heads, seq, dim) -> (1, heads, seq, dim)
-            value_tensor = cache.value_cache[layer_idx][source_idx : source_idx + 1]
-            new_cache.value_cache.append(value_tensor)
-
-    return new_cache
-
-
-def _concatenate_caches(cache_list: list[DynamicCache | None]) -> DynamicCache | None:
-    """
-    Helper function to concatenate multiple caches along the batch dimension.
-
-    Args:
-        cache_list: list of caches to concatenate
-
-    Returns:
-        A single cache with concatenated batch dimensions, or None if all inputs are None
-    """
-    # Filter out None caches
-    valid_caches = [cache for cache in cache_list if cache is not None]
-
-    if not valid_caches:
-        return None
-
-    assert len(valid_caches) == len(cache_list)
-
-    # Create a new DynamicCache instance
-    new_cache = DynamicCache()
-    new_cache.key_cache = []
-    new_cache.value_cache = []
-
-    # Concatenate caches layer by layer
-    for layer_idx in range(len(valid_caches[0].key_cache)):
-        # Concatenate key caches for this layer
-        key_tensors = [
-            cache.key_cache[layer_idx] for cache in valid_caches if cache.key_cache[layer_idx] is not None
-        ]
-        if key_tensors:
-            concatenated_key = torch.cat(key_tensors, dim=0)  # Concatenate along batch dimension
-            new_cache.key_cache.append(concatenated_key)
-
-        # Concatenate value caches for this layer
-        value_tensors = [
-            cache.value_cache[layer_idx] for cache in valid_caches if cache.value_cache[layer_idx] is not None
-        ]
-        if value_tensors:
-            concatenated_value = torch.cat(value_tensors, dim=0)  # Concatenate along batch dimension
-            new_cache.value_cache.append(concatenated_value)
-
-    return new_cache
 
 
 @dataclass
@@ -236,18 +50,6 @@ class KeyTokenGenMixin:
         config: KeyTokenGenConfig | None = None,
         **kwargs,
     ) -> GenerateKeyTokenOutput:
-        if kwargs.get("kt_fallback", False) or config and config.kt_fallback:
-            keys = ["temperature", "top_k", "top_p", "do_sample", "max_new_tokens"]
-            args_dict = config.__dict__ | kwargs
-            args = {k: args_dict[k] for k in keys if k in args_dict}
-            res = super().generate(  # type: ignore
-                input_ids,
-                attention_mask=attention_mask,
-                stopping_criteria=stopping_criteria,
-                use_cache=True,
-                **args,
-            )
-            return GenerateKeyTokenOutput(cast(torch.LongTensor, res))
         return generate(
             self,  # type: ignore
             self.kt_modules,
@@ -258,6 +60,109 @@ class KeyTokenGenMixin:
             config,
             **kwargs,
         )
+
+
+def _init_generation_config(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    config: KeyTokenGenConfig | None,
+    stopping_criteria: StoppingCriteriaList | None,
+    kt_modules: KtModules,
+    kwargs: dict,
+):
+    valid_keys = set(f.name for f in fields(KeyTokenGenConfig))
+    kwargs_config = {k: v for k, v in kwargs.items() if k in valid_keys}
+    if config is None:
+        config = KeyTokenGenConfig(**kwargs_config)
+    else:
+        config.__dict__.update(kwargs_config)
+    assert config.output_hidden_states is False, "output hidden states is not supported"
+    assert config.num_return_sequences > 1, "num_return_sequences must be greater than 1"
+
+    eos_id = cast(int, tokenizer.eos_token_id)
+    pad_id = cast(int, tokenizer.pad_token_id)
+
+    if attention_mask is None:
+        attention_mask = input_ids != pad_id
+
+    interval = None
+    if input_ids.ndim == 1:
+        input_ids = input_ids.unsqueeze(0)
+        attention_mask = attention_mask.unsqueeze(0)
+    if input_ids.ndim == 2:
+        if input_ids.shape[0] != 1:
+            interval = get_repeat_interleave(input_ids)
+            if interval > 1 and interval != config.num_return_sequences:
+                raise ValueError(
+                    f"interval ({interval}) must match num_return_sequences ({config.num_return_sequences})"
+                )
+    else:
+        raise ValueError(f"input_ids must be 1D or 2D, got {input_ids.ndim}D")
+    if interval is not None:
+        input_ids = input_ids[::interval]
+        attention_mask = attention_mask[::interval]
+    if config.fallback_level == "native":
+        input_ids = input_ids.repeat_interleave(config.num_return_sequences, dim=0)
+        attention_mask = attention_mask.repeat_interleave(config.num_return_sequences, dim=0)
+
+    # init constants
+    # for common generation
+    if stopping_criteria is None:
+        eos_id = cast(int, tokenizer.eos_token_id)
+        stopping_criteria = StoppingCriteriaList([EosTokenCriteria(eos_token_id=eos_id)])
+    logits_proc = LogitsProcessorList([TemperatureLogitsWarper(temperature=config.temperature)])
+    if config.top_k is not None and config.top_k > 0:
+        logits_proc.append(TopKLogitsWarper(top_k=config.top_k))
+    if config.top_p is not None and config.top_p < 1:
+        logits_proc.append(TopPLogitsWarper(top_p=config.top_p))
+    # for key token generation
+    if config.fallback_level == "native":
+        print("fallback level is native; key token generation is disabled")
+        key_token_filters = None
+        rollout_filter = None
+    else:
+        if kt_modules.sched is None:
+            kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, config.__dict__)
+        key_token_filters = create_key_token_filter(
+            tokenizer=tokenizer,
+            embedding_module=model.get_input_embeddings(),
+            prob_filter_abs_thres=kt_modules.sched.prob_filter_abs_thres,
+            prob_filter_rel_thres=kt_modules.sched.prob_filter_rel_thres,
+            similarity_filter_thres=kt_modules.sched.similarity_filter_thres,
+            stop_word_filter=config.stop_word_filter,
+        )
+        if config.model_filter_path is not None and kt_modules.filter is None:
+            kt_modules.filter = DivJudge(config.model_filter_path)
+            kt_modules.filter.to(input_ids.device)
+            if kt_modules.sched.model_filter_cand_thres is not None:
+                key_token_filters.append(
+                    ModelFilter(tokenizer, kt_modules.filter, kt_modules.sched.model_filter_cand_thres)
+                )
+        # in rl the model may be set to train mode in the training loop, so keep it in eval mode
+        if kt_modules.filter is not None:
+            kt_modules.filter.eval()
+        if config.rollout_filter_edit_dist_thres is not None or config.model_filter_rollout_thres is not None:
+            rollout_filter = RolloutFilter(
+                config.rollout_filter_steps,
+                kt_modules.sched.rollout_filter_edit_dist_thres,
+                kt_modules.sched.model_filter_rollout_thres,
+                tokenizer,
+                kt_modules.filter if kt_modules.sched.model_filter_rollout_thres is not None else None,
+            )
+        else:
+            rollout_filter = None
+
+    return (
+        config,
+        input_ids,
+        attention_mask,
+        rollout_filter,
+        key_token_filters,
+        stopping_criteria,
+        logits_proc,
+    )
 
 
 def _sample_new_sequence_with_rollout(
@@ -375,7 +280,7 @@ def _sample_new_sequence_with_rollout(
                 dim=1,
             )
             new_branch_attn.append(new_attn_row)
-            new_branch_caches.append(_duplicate_cache_for_sequence(cache, row))
+            new_branch_caches.append(duplicate_cache_for_sequence(cache, row))
     assert len(new_tokens_on_original_branch) == len(current_ids)
     assert len(new_branch_seqs) == len(new_branch_attn) == len(new_branch_caches)
     assert len(new_branch_seqs) + len(current_ids) == (sample_masks == 0).sum()
@@ -394,7 +299,7 @@ def _sample_new_sequence_with_rollout(
         current_ids = torch.cat([current_ids, *new_branch_seqs])
         attention_mask = torch.cat([attention_mask, *new_branch_attn])
         if cache is not None:
-            cache = _concatenate_caches([cache, *new_branch_caches])
+            cache = concatenate_caches([cache, *new_branch_caches])
 
     assert len(current_ids) == len(attention_mask) == (sample_masks == 0).sum()
     return current_ids, attention_mask, cache
@@ -417,72 +322,13 @@ def generate(
     Every time a new token is generated, the tree is split into multiple branches if this is a key token and has multiple valid candidates.
     If the number of branches exceeds num_return_sequences, the branches with lower probability are suppressed.
     """
-    valid_keys = set(f.name for f in fields(KeyTokenGenConfig))
-    kwargs_config = {k: v for k, v in kwargs.items() if k in valid_keys}
-    if config is None:
-        config = KeyTokenGenConfig(**kwargs_config)
-    else:
-        config.__dict__.update(kwargs_config)
-    assert config.output_hidden_states is False, "output hidden states is not supported"
-    assert config.num_return_sequences > 1, "num_return_sequences must be greater than 1"
-
+    config, input_ids, attention_mask, rollout_filter, key_token_filters, stopping_criteria, logits_proc = (
+        _init_generation_config(
+            model, tokenizer, input_ids, attention_mask, config, stopping_criteria, kt_modules, kwargs
+        )
+    )
     eos_id = cast(int, tokenizer.eos_token_id)
     pad_id = cast(int, tokenizer.pad_token_id)
-
-    if kt_modules.sched is None:
-        kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, config.__dict__)
-    if attention_mask is None:
-        attention_mask = input_ids != pad_id
-
-    if input_ids.ndim == 1:
-        input_ids = input_ids.unsqueeze(0)
-        attention_mask = attention_mask.unsqueeze(0)
-    if input_ids.ndim == 2:
-        if input_ids.shape[0] != 1:
-            interval = get_repeat_interleave(input_ids)
-            if interval > 1 and interval != config.num_return_sequences:
-                raise ValueError(
-                    f"interval ({interval}) must match num_return_sequences ({config.num_return_sequences})"
-                )
-            input_ids = input_ids[::interval]
-            attention_mask = attention_mask[::interval]
-    else:
-        raise ValueError(f"input_ids must be 1D or 2D, got {input_ids.ndim}D")
-
-    # init constants
-    if stopping_criteria is None:
-        eos_id = cast(int, tokenizer.eos_token_id)
-        stopping_criteria = StoppingCriteriaList([EosTokenCriteria(eos_token_id=eos_id)])
-    key_token_filters = create_key_token_filter(
-        tokenizer=tokenizer,
-        embedding_module=model.get_input_embeddings(),
-        prob_filter_thres=kt_modules.sched.prob_filter_thres,
-        similarity_filter_thres=kt_modules.sched.similarity_filter_thres,
-        stop_word_filter=config.stop_word_filter,
-    )
-    if config.model_filter_path is not None and kt_modules.filter is None:
-        kt_modules.filter = DivJudge(config.model_filter_path)
-        kt_modules.filter.to(input_ids.device)
-        if kt_modules.sched.model_filter_cand_thres is not None:
-            key_token_filters.append(
-                ModelFilter(tokenizer, kt_modules.filter, kt_modules.sched.model_filter_cand_thres)
-            )
-    # in rl the model may be set to train mode in the training loop, so keep it in eval mode
-    if kt_modules.filter is not None:
-        kt_modules.filter.eval()
-    rollout_filter = RolloutFilter(
-        config.rollout_filter_steps,
-        kt_modules.sched.rollout_filter_edit_dist_thres,
-        kt_modules.sched.model_filter_rollout_thres,
-        tokenizer,
-        kt_modules.filter if kt_modules.sched.model_filter_rollout_thres is not None else None,
-    )
-    logits_proc = LogitsProcessorList([TemperatureLogitsWarper(temperature=config.temperature)])
-    if config.top_k is not None and config.top_k > 0:
-        logits_proc.append(TopKLogitsWarper(top_k=config.top_k))
-    if config.top_p is not None and config.top_p < 1:
-        logits_proc.append(TopPLogitsWarper(top_p=config.top_p))
-    bs_roots = input_ids.shape[0]
 
     # Unified state
     current_ids: torch.Tensor = cast(torch.LongTensor, input_ids.clone())
@@ -491,10 +337,24 @@ def generate(
     input_len: int = int(input_ids.shape[1])
     cache: DynamicCache | None = DynamicCache() if config.use_cache else None
     # Allocate stop_lens up to max total capacity
+    bs_roots = input_ids.shape[0]
     max_total = bs_roots * config.num_return_sequences
     stop_lens = torch.zeros(max_total, device=input_ids.device, dtype=input_ids.dtype)
     branch_info = BranchInfo(n_roots=bs_roots)
     all_suppressed = 0
+
+    if config.fallback_level == "fill":
+        if config.rollout_filter_edit_dist_thres is not None or config.model_filter_rollout_thres is not None:
+            print("fallback is set to fill; all rollout filters are disabled")
+            config.rollout_filter_edit_dist_thres = None
+            config.model_filter_rollout_thres = None
+            rollout_filter = None
+        children_ids = current_ids.repeat_interleave(config.num_return_sequences - 1, dim=0)
+        current_ids = torch.cat([current_ids, children_ids], dim=0)
+        children_attn = attention_mask.repeat_interleave(config.num_return_sequences - 1, dim=0)
+        current_attention_mask = torch.cat([current_attention_mask, children_attn], dim=0)
+        for i, _ in product(range(bs_roots), range(config.num_return_sequences - 1)):
+            branch_info.add_branch(i, 0)
 
     # Generation loop (batched forward; per-root branching)
     wrapped_range = range(config.max_new_tokens)
@@ -502,9 +362,8 @@ def generate(
         wrapped_range = tqdm(wrapped_range, desc="Generating")
     for step in wrapped_range:
         # Forward pass
-        concat_current_ids = current_ids[:, -1:] if step and config.use_cache else current_ids
         outputs = model(
-            input_ids=concat_current_ids,
+            input_ids=current_ids[:, -1:] if step and config.use_cache else current_ids,
             attention_mask=current_attention_mask,
             past_key_values=cache,
             use_cache=config.use_cache,
@@ -522,33 +381,44 @@ def generate(
         # Unified sampling/branching
         logits_u = logits_proc(cast(torch.LongTensor, current_ids), cast(torch.FloatTensor, logits))
         probs = torch.softmax(logits_u, dim=-1)
-        active_bs = current_ids.shape[0]
-        complete_mask = stop_lens[:active_bs] != 0
-        current_ids, current_attention_mask, cache = _sample_new_sequence_with_rollout(
-            key_token_filters,
-            probs,
-            current_ids,
-            current_attention_mask,
-            cache,
-            complete_mask,
-            config.num_return_sequences,
-            config.max_n_branch_per_token,
-            config.sample_nk,
-            branch_info,
-            step,
-            input_len,
-            eos_id,
-            config.sync_gpus,
-        )
 
-        # Rollout filtering
-        completion_ids = current_ids[:, input_len:]
-        remove_set = rollout_filter.get_remove_indices(completion_ids, branch_info, step + 1, eos_id)
-        current_ids, stop_lens, cache, new_attn = branch_info.remove(
-            current_ids, stop_lens, cache, remove_set, attention_mask=current_attention_mask
-        )
-        if new_attn is not None:
-            current_attention_mask = new_attn
+        if config.fallback_level == "native":
+            new_tokens = torch.multinomial(probs, num_samples=1)
+            current_ids = torch.cat([current_ids, new_tokens], dim=1)
+            new_attn_mask = torch.ones(
+                (current_ids.shape[0], 1), device=current_ids.device, dtype=current_attention_mask.dtype
+            )
+            current_attention_mask = torch.cat([current_attention_mask, new_attn_mask], dim=1)
+        else:
+            assert key_token_filters is not None
+            active_bs = current_ids.shape[0]
+            complete_mask = stop_lens[:active_bs] != 0
+            current_ids, current_attention_mask, cache = _sample_new_sequence_with_rollout(
+                key_token_filters,
+                probs,
+                current_ids,
+                current_attention_mask,
+                cache,
+                complete_mask,
+                config.num_return_sequences,
+                config.max_n_branch_per_token,
+                config.sample_nk,
+                branch_info,
+                step,
+                input_len,
+                eos_id,
+                config.sync_gpus,
+            )
+
+            # Rollout filtering
+            if rollout_filter is not None:
+                completion_ids = current_ids[:, input_len:]
+                remove_set = rollout_filter.get_remove_indices(completion_ids, branch_info, step + 1, eos_id)
+                current_ids, stop_lens, cache, new_attn = branch_info.remove(
+                    current_ids, stop_lens, cache, remove_set, attention_mask=current_attention_mask
+                )
+                if new_attn is not None:
+                    current_attention_mask = new_attn
 
         # stopping criteria
         all_done = True
@@ -559,7 +429,7 @@ def generate(
         if not stop_lens[:bs_now].all():
             all_done = False
 
-        if isinstance(wrapped_range, tqdm):
+        if isinstance(wrapped_range, tqdm) and config.fallback_level != "native":
             all_suppressed = sum(b.suppressed_num for b in branch_info)
             wrapped_range.set_postfix(
                 suppressed=all_suppressed, branches=branch_info.get_root_branches_repr()
@@ -567,7 +437,11 @@ def generate(
         if all_done and not config.sync_gpus:
             break
 
+    if config.fallback_level == "native":
+        return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, current_ids))
+
     # Step scheduler
+    assert kt_modules.sched is not None
     suppress_ratio = all_suppressed / (bs_roots * config.num_return_sequences * config.max_new_tokens)
     empty_branch_ratio = 1 - len(branch_info) / (bs_roots * config.num_return_sequences)
     kt_modules.sched.step(suppress_ratio, empty_branch_ratio)

@@ -1,214 +1,17 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections import Counter
-from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 import nltk
 import torch
 from torchaudio.functional import edit_distance
-from transformers.cache_utils import DynamicCache
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from model.diverge import DivCollator, DivJudge
+from model.utils import BranchInfo
 
 math_core_symbols = "+-*/\\<>=()[]{}_^&%$0123456789"
-
-
-@dataclass
-class Branch:
-    """Information about each branch for rollout filtering.
-
-    When a branch is a root (has parent_idx == None), its ``root_id`` is a
-    stable identifier that preserves the original root ordering even if
-    indices are compacted during removals. Non-root branches have ``root_id``
-    set to None.
-    """
-
-    parent: Optional[int]
-    root: int
-    birth_step: int
-    children: set[int] = field(default_factory=set)
-    suppressed_num: int = 0
-
-
-class BranchInfo:
-    """Information about the tree of branches for rollout filtering.
-    ``branches[i]`` is the i-th branch (also for the i-th sequence exactly).
-
-    Supports multiple roots in a single object. Roots are branches with
-    ``parent_idx is None``. Their order is tracked via ``root_id``.
-    """
-
-    def __init__(self, n_roots: int):
-        if n_roots < 0:
-            raise ValueError("n_roots must be >= 0")
-        self.branches = [Branch(parent=None, birth_step=0, root=i) for i in range(n_roots)]
-
-    @staticmethod
-    def from_branch_list(branches: list[Branch]) -> BranchInfo:
-        res = BranchInfo(0)
-        res.branches = branches
-        return res
-
-    def __repr__(self) -> str:
-        head = "   idx parent  birth   root    children"
-        lines = [head]
-        for i, b in enumerate(self.branches):
-            children = ", ".join(str(c) for c in b.children)
-            parent_idx = b.parent if b.parent is not None else "None"
-            lines.append(f"{i:>6} {parent_idx:>6} {b.birth_step:>6} {b.root:>6}    {children}")
-        return "\n".join(lines)
-
-    def add_branch(self, parent: int, birth_step: int):
-        # Validate parent_idx
-        if parent < 0 or parent >= len(self.branches):
-            raise ValueError(f"Invalid parent_idx {parent}. Must be in range [0, {len(self.branches)})")
-
-        new_branch = Branch(parent, self.branches[parent].root, birth_step)
-        self.branches.append(new_branch)
-        self.branches[parent].children.add(len(self.branches) - 1)
-
-    def __getitem__(self, idx) -> Branch:
-        return self.branches[idx]
-
-    def __len__(self) -> int:
-        return len(self.branches)
-
-    def __iter__(self):
-        return iter(self.branches)
-
-    def get_branch_ids_by_birth_step(self, birth_step: int) -> list[int]:
-        return [i for i, b in enumerate(self.branches) if b.birth_step == birth_step]
-
-    def _get_recursive_remove_indices(self, indices: Iterable[int]) -> set[int]:
-        indices_to_process = set(indices)
-        indices_to_remove = set(indices)  # Start with the original indices
-
-        while indices_to_process:
-            idx = indices_to_process.pop()
-            # Validate index
-            if idx < 0 or idx >= len(self.branches):
-                raise ValueError(f"Invalid index {idx}. Must be in range [0, {len(self.branches)})")
-
-            for child in self.branches[idx].children:
-                if child not in indices_to_remove:  # Avoid infinite loops
-                    indices_to_process.add(child)
-                    indices_to_remove.add(child)
-
-        return indices_to_remove
-
-    def _remove_branches(self, indices_to_remove: set[int]):
-        # Validate all indices
-        for idx in indices_to_remove:
-            if idx < 0 or idx >= len(self.branches):
-                raise ValueError(f"Invalid index {idx}. Must be in range [0, {len(self.branches)})")
-
-        # Cannot remove any root branch
-        if any(self.branches[idx].parent is None for idx in indices_to_remove):
-            raise ValueError("Cannot remove a root branch")
-
-        # Remove parent-child relationships
-        for idx in indices_to_remove:
-            parent = self.branches[idx].parent
-            if parent is not None:
-                self.branches[parent].children.remove(idx)
-
-        # Create mapping from old indices to new indices
-        new_branches: list[Branch] = []
-        old_to_new_mapping: dict[int, int] = {}
-
-        for old_idx, branch in enumerate(self.branches):
-            if old_idx not in indices_to_remove:
-                new_idx = len(new_branches)
-                old_to_new_mapping[old_idx] = new_idx
-                new_branches.append(branch)
-
-        # Update all parent_idx and children references to use new indices
-        for branch in new_branches:
-            # Update parent_idx
-            if branch.parent is not None:
-                branch.parent = old_to_new_mapping[branch.parent]
-
-            # Update children set
-            new_children = set()
-            for old_child_idx in branch.children:
-                if old_child_idx in old_to_new_mapping:
-                    new_children.add(old_to_new_mapping[old_child_idx])
-            branch.children = new_children
-
-        self.branches = new_branches
-
-    def group_by_root(self) -> dict[int, list[int]]:
-        """Group branch indices by their stable root_id."""
-        groups: dict[int, list[int]] = {}
-        for i in range(len(self.branches)):
-            root_id = self.branches[i].root
-            groups.setdefault(root_id, []).append(i)
-        return groups
-
-    def get_num_branch(self, id: int) -> int:
-        """Return the number of branches that have the same root."""
-        root_branch = self.branches[self.branches[id].root]
-        return len(root_branch.children) + 1
-
-    def get_root_branches_repr(self, max_n_display=8) -> str:
-        groups = self.group_by_root()
-        nums = [len(groups[rid]) for rid in sorted(groups.keys())]
-        if len(nums) > max_n_display:
-            nums = [f"{n}x{c}" for n, c in Counter(nums).most_common(max_n_display)]
-        return "[" + ",".join(str(n) for n in nums) + "]"
-
-    def remove(
-        self,
-        sequence: torch.Tensor,
-        stop_lens: torch.Tensor,
-        cache: DynamicCache | None,
-        indices_to_remove: Iterable[int],
-        attention_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, DynamicCache | None, torch.Tensor | None]:
-        """
-        Remove branches and their children from the sequence and cache, updating self states.
-        """
-        remove_set = self._get_recursive_remove_indices(indices_to_remove)
-        self._remove_branches(remove_set)
-
-        remove_list = list(remove_set)
-        bs = len(sequence)
-        mask = torch.ones(bs, dtype=torch.bool)
-        mask[remove_list] = False
-        new_sequence = sequence[mask]
-        new_bs = len(new_sequence)
-        stop_lens[:new_bs] = stop_lens[:bs][mask]
-        stop_lens[new_bs:] = 0
-
-        new_attention_mask = None
-        if attention_mask is not None:
-            new_attention_mask = attention_mask[mask]
-
-        new_cache = None
-        if cache is not None:
-            # Create a new DynamicCache instance
-            new_cache = DynamicCache()
-            new_cache.key_cache = []
-            new_cache.value_cache = []
-
-            # Filter each layer's cache using the same mask
-            for layer_idx in range(len(cache.key_cache)):
-                # Only append key cache if it exists
-                if cache.key_cache[layer_idx] is not None:
-                    # Filter along batch dimension: (batch, heads, seq, dim) -> (filtered_batch, heads, seq, dim)
-                    filtered_key = cache.key_cache[layer_idx][mask]
-                    new_cache.key_cache.append(filtered_key)
-
-                # Only append value cache if it exists
-                if cache.value_cache[layer_idx] is not None:
-                    # Filter along batch dimension: (batch, heads, seq, dim) -> (filtered_batch, heads, seq, dim)
-                    filtered_value = cache.value_cache[layer_idx][mask]
-                    new_cache.value_cache.append(filtered_value)
-
-        return new_sequence, stop_lens, new_cache, new_attention_mask
 
 
 class KeyTokenFilter(ABC):
@@ -232,14 +35,26 @@ class KeyTokenFilter(ABC):
 class ProbFilter(KeyTokenFilter):
     "only keep tokens with probability greater than prob_filter_thres"
 
-    def __init__(self, tokenizer: PreTrainedTokenizer, prob_filter_thres: float):
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        prob_filter_abs_thres: float | None,
+        prob_filter_rel_thres: float | None,
+    ):
         super().__init__(tokenizer)
-        self.prob_filter_thres = prob_filter_thres
+        self.prob_filter_abs_thres = prob_filter_abs_thres
+        self.prob_filter_rel_thres = prob_filter_rel_thres
 
     def __call__(
         self, sequences: torch.Tensor, candidates: torch.Tensor, probs: torch.Tensor
     ) -> torch.Tensor:
-        return probs > self.prob_filter_thres
+        bs, n_cand = probs.shape
+        mask = torch.ones([bs, n_cand - 1], dtype=torch.bool, device=probs.device)
+        if self.prob_filter_abs_thres is not None:
+            mask = mask & (probs[:, 1:] > self.prob_filter_abs_thres)
+        if self.prob_filter_rel_thres is not None:
+            mask = mask & (probs[:, 0:1] - probs[:, 1:] > self.prob_filter_rel_thres)
+        return mask
 
 
 class SimilarityFilter(KeyTokenFilter):
@@ -252,6 +67,7 @@ class SimilarityFilter(KeyTokenFilter):
         similarity_filter_thres: float,
     ):
         raise NotImplementedError("SimilarityFilter is not implemented")
+        # NOTE align shape if enabled
         super().__init__(tokenizer)
         self.similarity_filter_thres = similarity_filter_thres
         self.embedding_module = embedding_module
@@ -299,13 +115,13 @@ class StopWordFilter(KeyTokenFilter):
     def __call__(
         self, sequences: torch.Tensor, candidates: torch.Tensor, probs: torch.Tensor
     ) -> torch.Tensor:
-        assert candidates.ndim == 2
-        mask = torch.ones_like(candidates, dtype=torch.bool, device="cpu")
+        batch, n_cand = candidates.shape
+        mask = torch.ones([batch, n_cand - 1], dtype=torch.bool)
 
         for sample_idx, candidate in enumerate(candidates):
-            for token_idx, token_id in enumerate(candidate):
+            for token_idx, token_id in enumerate(candidate[1:]):
                 # keep the first token, otherwise stop words will never be sampled out
-                if token_idx == 0 or token_id == -1:
+                if token_id == -1:
                     continue
 
                 token_text = self.tokenizer.decode([token_id]).strip()
@@ -363,8 +179,7 @@ class ModelFilter(KeyTokenFilter):
                     scores[id] = 0
 
         scores = scores.reshape(bs, n_cand - 1)
-        first = torch.ones([bs, 1], device=scores.device, dtype=torch.bool)
-        return torch.cat([first, scores < self.model_filter_thres], dim=1)
+        return scores < self.model_filter_thres
 
 
 class KeyTokenFilterList:
@@ -374,11 +189,12 @@ class KeyTokenFilterList:
     def __call__(
         self, sequences: torch.Tensor, candidates: torch.Tensor, probs: torch.Tensor
     ) -> torch.Tensor:
-        assert candidates.ndim == 2
-        mask = torch.ones_like(candidates, dtype=torch.bool)
+        "return shape: (batch, n_cand - 1) since the first token is always kept"
+        batch, n_cand = candidates.shape
+        mask = torch.ones([batch, n_cand - 1], device=candidates.device, dtype=torch.bool)
         for filter in self.filters:
             mask = mask & filter(sequences, candidates, probs)
-            if not mask[:, 1:].any():
+            if not mask.any():
                 break
         return mask
 
@@ -479,7 +295,8 @@ class RolloutFilter:
 def create_key_token_filter(
     tokenizer: PreTrainedTokenizer,
     embedding_module: Optional[torch.nn.Module] = None,
-    prob_filter_thres: Optional[float] = None,
+    prob_filter_abs_thres: Optional[float] = None,
+    prob_filter_rel_thres: Optional[float] = None,
     similarity_filter_thres: Optional[float] = None,
     stop_word_filter: bool = False,
 ) -> KeyTokenFilterList:
@@ -489,7 +306,8 @@ def create_key_token_filter(
     Args:
         tokenizer: The tokenizer to use for text processing
         embedding_module: Module for embeddings (required if using similarity filter)
-        prob_filter_thres: Probability threshold for ProbFilter (None to disable)
+        prob_filter_abs_thres: Absolute probability threshold for ProbFilter (None to disable)
+        prob_filter_rel_thres: Relative probability threshold for ProbFilter (None to disable)
         similarity_filter_thres: Similarity threshold for SimilarityFilter (None to disable)
         stop_word_filter: Whether to enable StopWordFilter
 
@@ -498,8 +316,8 @@ def create_key_token_filter(
     """
     filters = []
 
-    if prob_filter_thres is not None:
-        filters.append(ProbFilter(tokenizer, prob_filter_thres))
+    if prob_filter_abs_thres is not None or prob_filter_rel_thres is not None:
+        filters.append(ProbFilter(tokenizer, prob_filter_abs_thres, prob_filter_rel_thres))
 
     if stop_word_filter:
         filters.append(StopWordFilter(tokenizer))

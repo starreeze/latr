@@ -34,7 +34,6 @@ class DataWorker(MultiGPUWorker):
         model.to(device)  # type: ignore
         model.eval()
         assert isinstance(model, KeyTokenGenMixin)
-        assert data_args.generate_batch_size == 1
 
         # Set up data processing
         data_args.align_label_with_tf_mask = False
@@ -49,21 +48,24 @@ class DataWorker(MultiGPUWorker):
             loader, total=len(loader), desc=f"eval {data_args.eval_dataset} GPU {gpu_id}", position=gpu_id
         ):
             inputs: dict[str, Any] = to_device(batch, device)  # type: ignore
-            question_raw = inputs["question_ids"]
+            question_raw = inputs["question_ids"].repeat_interleave(
+                generation_args.num_return_sequences, dim=0
+            )
+            attention_mask = inputs["attention_mask"].repeat_interleave(
+                generation_args.num_return_sequences, dim=0
+            )
 
-            results = model.generate(question_raw, tokenizer, **generation_args.__dict__)
+            results = model.generate(question_raw, tokenizer, attention_mask, **generation_args.__dict__)
             branches = results.branch_info
             assert branches is not None
             pred_raw = results.sequences[: len(branches)]
 
             pred_raw_strs = tokenizer.batch_decode(pred_raw, skip_special_tokens=True)
-            sample = {k: v[0] for k, v in inputs.items()}
-            sample["question_ids"] = sample["question_ids"].squeeze()
-            prompt_len = len(sample["question_ids"])
+            prompt_len = question_raw.shape[1]
             answers = []
 
-            for pred_raw_str in pred_raw_strs:
-                question_str = tokenizer.decode(sample["question_ids"], skip_special_tokens=True)
+            for question_id, pred_raw_str in zip(question_raw, pred_raw_strs):
+                question_str = tokenizer.decode(question_id, skip_special_tokens=True)
                 assert pred_raw_str.startswith(question_str)
                 pred_raw_str = pred_raw_str[len(question_str) :]
                 answers.append(answer_extractor(pred_raw_str))
@@ -79,12 +81,14 @@ class DataWorker(MultiGPUWorker):
                 prefix = pred_raw[i, prompt_len:start]
                 if data_args.diverge_max_prefix_len is not None:
                     prefix = prefix[-data_args.diverge_max_prefix_len :]
+                prefix = tokenizer.decode(prefix, skip_special_tokens=True).strip()
                 for k in data_args.diverge_seqlen_k:
                     a = pred_raw[i, start : start + k]
                     b = pred_raw[branch.parent, start : start + k]
                     if random.random() < 0.5:
                         a, b = b, a
-                    # do not move it to cpu here as it may cause hang
+                    a = tokenizer.decode(a, skip_special_tokens=True).strip()
+                    b = tokenizer.decode(b, skip_special_tokens=True).strip()
                     sample_pairs[label].append((prefix, a, b))
 
             if data_args.diverge_balance_label:
@@ -138,7 +142,7 @@ def construct_dataset():
     )
     dataset = Dataset.from_list(results)
     model_name = os.path.basename(model_args.model.rstrip("/"))
-    dataset.to_parquet(f"{data_args.data_dir}/diverge/{model_name}_{start_pos}.parquet")
+    dataset.to_parquet(f"{data_args.data_dir}/diverge/{model_name}_{start_pos}_{end_pos}.parquet")
 
 
 def load_dataset(path: str, test_ratio: float = 0.05):
@@ -156,7 +160,7 @@ def load_dataset(path: str, test_ratio: float = 0.05):
     data_2_5 = data_2_5.select(range(min_len))
     data_3 = data_3.select(range(min_len))
     dataset = concatenate_datasets([data_2_5, data_3])
-    dataset = dataset.filter(lambda x: len(x["a"]) > 1)
+    dataset = dataset.filter(lambda x: x["label"] == 0 or x["label"] == 1)
     dataset = dataset.train_test_split(test_size=test_ratio, shuffle=True)
     return dataset["train"], dataset["test"]
 

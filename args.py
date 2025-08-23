@@ -150,7 +150,7 @@ class DataArgs:
     generate_batch_size: int = field(default=1, metadata={"help": "The batch size for generation."})
 
     # for diverge
-    diverge_seqlen_k: list[int] = field(default_factory=lambda: [1, 20, 30, 50])
+    diverge_seqlen_k: list[int] = field(default_factory=lambda: [20, 30, 50])
     diverge_balance_label: bool = field(
         default=True, metadata={"help": "Whether to balance the label by subsampling."}
     )
