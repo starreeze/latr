@@ -22,7 +22,7 @@ default model is qwen3-1.7b-base and dataset is countdown.
 ### evaluation
 
 ```bash
-python -m tools.diversity --model Qwen/Qwen3-1.7B [--force_key_token_model qwen3] --eval_dataset aime --do_sample --temperature 0.6 --top_k 20 --top_p 0.95 --cot_type plain --max_new_tokens 7000 --enable_latent false --n_gpus 8 --generate_batch_size 2 --num_return_sequences 12
+python -m tools.diversity --model Qwen/Qwen2.5-3B --force_key_token_model qwen2 --eval_dataset countdown --do_sample --temperature 0.6 --top_k 20 --top_p 0.95 --cot_type xml --max_new_tokens 1000 --mix_ratio 0.5 --n_gpus 8 --generate_batch_size 2 --num_return_sequences 4
 ```
 
 ## the divergence model

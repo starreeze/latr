@@ -1,10 +1,11 @@
-from dataclasses import dataclass, fields
+import time
+from collections import defaultdict
+from dataclasses import dataclass
 from itertools import product
 from typing import Literal, cast
 
 import torch
 from tqdm import tqdm
-from transformers.cache_utils import DynamicCache
 from transformers.generation.logits_process import (
     LogitsProcessorList,
     TemperatureLogitsWarper,
@@ -17,15 +18,12 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 
 from model.diverge import DivJudge
 from model.sample_filter import KeyTokenFilterList, ModelFilter, RolloutFilter, create_key_token_filter
-from model.utils import GenConfig  # noqa: F401
 from model.utils import (
-    Branch,
     BranchInfo,
     BranchParamScheduler,
     GenerateKeyTokenOutput,
     KeyTokenGenConfig,
-    concatenate_caches,
-    duplicate_cache_for_sequence,
+    MixedCache,
 )
 from tools.utils import get_repeat_interleave, init_dataclass_from_dict
 
@@ -72,12 +70,9 @@ def _init_generation_config(
     kt_modules: KtModules,
     kwargs: dict,
 ):
-    valid_keys = set(f.name for f in fields(KeyTokenGenConfig))
-    kwargs_config = {k: v for k, v in kwargs.items() if k in valid_keys}
-    if config is None:
-        config = KeyTokenGenConfig(**kwargs_config)
-    else:
-        config.__dict__.update(kwargs_config)
+    args_dict = (config.__dict__ | kwargs) if config else kwargs
+    config = init_dataclass_from_dict(KeyTokenGenConfig, args_dict)
+    assert config.use_cache
     assert config.output_hidden_states is False, "output hidden states is not supported"
     assert config.num_return_sequences > 1, "num_return_sequences must be greater than 1"
 
@@ -170,7 +165,7 @@ def _sample_new_sequence_with_rollout(
     probs: torch.Tensor,  # (batch, vocab)
     current_ids: torch.Tensor,  # (batch, seq_len)
     attention_mask: torch.Tensor,  # (batch, seq_len)
-    cache: DynamicCache | None,
+    cache: MixedCache,
     complete_mask: torch.Tensor,  # (batch,)
     num_return_sequences: int,
     max_n_branch_per_token: int,
@@ -180,7 +175,7 @@ def _sample_new_sequence_with_rollout(
     input_len: int,
     eos_id: int,
     sync_gpus: bool,
-) -> tuple[torch.Tensor, torch.Tensor, DynamicCache | None]:
+) -> tuple[torch.Tensor, torch.Tensor, MixedCache]:
     """
     Unified batched sampling and branching across all roots.
     Maintains a single current_ids tensor and a single BranchInfo with multiple roots.
@@ -242,7 +237,7 @@ def _sample_new_sequence_with_rollout(
     new_tokens_on_original_branch: list[int] = []
     new_branch_seqs: list[torch.Tensor] = []
     new_branch_attn: list[torch.Tensor] = []
-    new_branch_caches: list[DynamicCache | None] = []
+    dup_kt_rows: list[int] = []
 
     for row in range(batch_size):
         if complete_mask[row]:
@@ -280,9 +275,10 @@ def _sample_new_sequence_with_rollout(
                 dim=1,
             )
             new_branch_attn.append(new_attn_row)
-            new_branch_caches.append(duplicate_cache_for_sequence(cache, row))
+            # Defer duplicating cache rows for these new branches
+            dup_kt_rows.append(row)
     assert len(new_tokens_on_original_branch) == len(current_ids)
-    assert len(new_branch_seqs) == len(new_branch_attn) == len(new_branch_caches)
+    assert len(new_branch_seqs) == len(new_branch_attn)
     assert len(new_branch_seqs) + len(current_ids) == (sample_masks == 0).sum()
 
     # 6) Append new tokens for original branches
@@ -298,8 +294,7 @@ def _sample_new_sequence_with_rollout(
     if new_branch_seqs:
         current_ids = torch.cat([current_ids, *new_branch_seqs])
         attention_mask = torch.cat([attention_mask, *new_branch_attn])
-        if cache is not None:
-            cache = concatenate_caches([cache, *new_branch_caches])
+        cache.append_dup_kt_rows(dup_kt_rows)
 
     assert len(current_ids) == len(attention_mask) == (sample_masks == 0).sum()
     return current_ids, attention_mask, cache
@@ -331,17 +326,28 @@ def generate(
     pad_id = cast(int, tokenizer.pad_token_id)
 
     # Unified state
-    current_ids: torch.Tensor = cast(torch.LongTensor, input_ids.clone())
-    current_attention_mask: torch.Tensor = cast(torch.LongTensor, attention_mask.clone())
+    kt_n_gen = round(config.num_return_sequences * config.mix_ratio)
+    assert 0 < kt_n_gen <= config.num_return_sequences
+    orig_n_gen = config.num_return_sequences - kt_n_gen
+    orig_n_samples = orig_n_gen * len(input_ids)
+    kt_ids: torch.Tensor = cast(torch.LongTensor, input_ids.clone())
+    kt_mask: torch.Tensor = cast(torch.LongTensor, attention_mask.clone())
+    if orig_n_gen:
+        orig_ids = input_ids.repeat_interleave(orig_n_gen, dim=0)
+        orig_mask = attention_mask.repeat_interleave(orig_n_gen, dim=0)
+    else:
+        orig_ids = None
+        orig_mask = None
     # For left-padded inputs, generated tokens start at this constant index
     input_len: int = int(input_ids.shape[1])
-    cache: DynamicCache | None = DynamicCache() if config.use_cache else None
+    cache: MixedCache = MixedCache(orig_n_samples)
     # Allocate stop_lens up to max total capacity
     bs_roots = input_ids.shape[0]
     max_total = bs_roots * config.num_return_sequences
     stop_lens = torch.zeros(max_total, device=input_ids.device, dtype=input_ids.dtype)
     branch_info = BranchInfo(n_roots=bs_roots)
     all_suppressed = 0
+    times = defaultdict(float)
 
     if config.fallback_level == "fill":
         if config.rollout_filter_edit_dist_thres is not None or config.model_filter_rollout_thres is not None:
@@ -349,11 +355,11 @@ def generate(
             config.rollout_filter_edit_dist_thres = None
             config.model_filter_rollout_thres = None
             rollout_filter = None
-        children_ids = current_ids.repeat_interleave(config.num_return_sequences - 1, dim=0)
-        current_ids = torch.cat([current_ids, children_ids], dim=0)
-        children_attn = attention_mask.repeat_interleave(config.num_return_sequences - 1, dim=0)
-        current_attention_mask = torch.cat([current_attention_mask, children_attn], dim=0)
-        for i, _ in product(range(bs_roots), range(config.num_return_sequences - 1)):
+        children_ids = kt_ids.repeat_interleave(kt_n_gen - 1, dim=0)
+        kt_ids = torch.cat([kt_ids, children_ids], dim=0)
+        children_attn = attention_mask.repeat_interleave(kt_n_gen - 1, dim=0)
+        kt_mask = torch.cat([kt_mask, children_attn], dim=0)
+        for i, _ in product(range(bs_roots), range(kt_n_gen - 1)):
             branch_info.add_branch(i, 0)
 
     # Generation loop (batched forward; per-root branching)
@@ -362,45 +368,69 @@ def generate(
         wrapped_range = tqdm(wrapped_range, desc="Generating")
     for step in wrapped_range:
         # Forward pass
+        id_cache_start = time.time()
+
+        full_ids = torch.cat([orig_ids, kt_ids], dim=0) if orig_ids is not None else kt_ids
+        full_mask = torch.cat([orig_mask, kt_mask], dim=0) if orig_mask is not None else kt_mask
+        past_key_values = cache.to_dynamic()
+
+        forward_start = time.time()
+        times["id_cache"] += forward_start - id_cache_start
+
         outputs = model(
-            input_ids=current_ids[:, -1:] if step and config.use_cache else current_ids,
-            attention_mask=current_attention_mask,
-            past_key_values=cache,
+            input_ids=full_ids[:, -1:] if step and config.use_cache else full_ids,
+            attention_mask=full_mask,
+            past_key_values=past_key_values,
             use_cache=config.use_cache,
             output_hidden_states=True,
             labels=None,
             return_dict=True,
             logits_to_keep=1,
         )
+
+        id_cache_start = time.time()
+        times["forward"] += id_cache_start - forward_start
+
         if config.use_cache:
-            cache = outputs.past_key_values
+            assert outputs.past_key_values is not None
+            cache = MixedCache(orig_n_samples, outputs.past_key_values)
+
+        branching_start = time.time()
+        times["id_cache"] += branching_start - id_cache_start
+
         logits = outputs.logits  # (bs, 1, vocab_size)
         assert logits is not None and logits.shape[1] == 1
         logits = logits[:, 0]  # (bs, vocab)
 
         # Unified sampling/branching
-        logits_u = logits_proc(cast(torch.LongTensor, current_ids), cast(torch.FloatTensor, logits))
+        logits_u = logits_proc(cast(torch.LongTensor, full_ids), cast(torch.FloatTensor, logits))
         probs = torch.softmax(logits_u, dim=-1)
 
+        if orig_ids is not None:
+            assert orig_mask is not None
+            orig_probs = probs[:orig_n_samples]
+            new_tokens = torch.multinomial(orig_probs, num_samples=1)
+            orig_ids = torch.cat([orig_ids, new_tokens], dim=1)
+            new_attn_mask = torch.ones((orig_ids.shape[0], 1), device=orig_ids.device, dtype=orig_mask.dtype)
+            orig_mask = torch.cat([orig_mask, new_attn_mask], dim=1)
+        kt_probs = probs[orig_n_samples:]
+
         if config.fallback_level == "native":
-            new_tokens = torch.multinomial(probs, num_samples=1)
-            current_ids = torch.cat([current_ids, new_tokens], dim=1)
-            new_attn_mask = torch.ones(
-                (current_ids.shape[0], 1), device=current_ids.device, dtype=current_attention_mask.dtype
-            )
-            current_attention_mask = torch.cat([current_attention_mask, new_attn_mask], dim=1)
+            new_tokens = torch.multinomial(kt_probs, num_samples=1)
+            kt_ids = torch.cat([kt_ids, new_tokens], dim=1)
+            new_attn_mask = torch.ones((kt_ids.shape[0], 1), device=kt_ids.device, dtype=kt_mask.dtype)
+            kt_mask = torch.cat([kt_mask, new_attn_mask], dim=1)
         else:
             assert key_token_filters is not None
-            active_bs = current_ids.shape[0]
-            complete_mask = stop_lens[:active_bs] != 0
-            current_ids, current_attention_mask, cache = _sample_new_sequence_with_rollout(
+            complete_mask = stop_lens[orig_n_samples : orig_n_samples + kt_ids.shape[0]] != 0
+            kt_ids, kt_mask, cache = _sample_new_sequence_with_rollout(
                 key_token_filters,
-                probs,
-                current_ids,
-                current_attention_mask,
+                kt_probs,
+                kt_ids,
+                kt_mask,
                 cache,
                 complete_mask,
-                config.num_return_sequences,
+                kt_n_gen,
                 config.max_n_branch_per_token,
                 config.sample_nk,
                 branch_info,
@@ -412,18 +442,19 @@ def generate(
 
             # Rollout filtering
             if rollout_filter is not None:
-                completion_ids = current_ids[:, input_len:]
+                completion_ids = kt_ids[:, input_len:]
                 remove_set = rollout_filter.get_remove_indices(completion_ids, branch_info, step + 1, eos_id)
-                current_ids, stop_lens, cache, new_attn = branch_info.remove(
-                    current_ids, stop_lens, cache, remove_set, attention_mask=current_attention_mask
+                kt_ids, stop_lens, cache, new_attn = branch_info.remove(
+                    kt_ids, stop_lens, cache, remove_set, kt_mask, orig_n_samples
                 )
                 if new_attn is not None:
-                    current_attention_mask = new_attn
+                    kt_mask = new_attn
 
         # stopping criteria
+        full_ids = torch.cat([orig_ids, kt_ids], dim=0) if orig_ids is not None else kt_ids
         all_done = True
-        should_stop = stopping_criteria(current_ids, logits_u)  # type: ignore
-        bs_now = current_ids.shape[0]
+        should_stop = stopping_criteria(full_ids, logits_u)  # type: ignore
+        bs_now = full_ids.shape[0]
         mask = should_stop & (stop_lens[:bs_now] == 0)
         stop_lens[:bs_now][mask] = step + 1
         if not stop_lens[:bs_now].all():
@@ -434,11 +465,16 @@ def generate(
             wrapped_range.set_postfix(
                 suppressed=all_suppressed, branches=branch_info.get_root_branches_repr()
             )
+
+        times["branching"] += time.time() - branching_start
+
         if all_done and not config.sync_gpus:
             break
 
+    print(times)
+
     if config.fallback_level == "native":
-        return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, current_ids))
+        return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, kt_ids))
 
     # Step scheduler
     assert kt_modules.sched is not None
@@ -446,79 +482,41 @@ def generate(
     empty_branch_ratio = 1 - len(branch_info) / (bs_roots * config.num_return_sequences)
     kt_modules.sched.step(suppress_ratio, empty_branch_ratio)
 
-    # Finalize outputs for unified batch; pad per-sequence and then global pad
-    sequences_per_root: list[torch.Tensor] = []
-    groups = branch_info.group_by_root()
-
-    # Rebuild a consistent BranchInfo aligned with the reordered (and possibly duplicated) sequences
-    new_branches: list[Branch] = []
-    old_to_new: dict[int, int] = {}
-
-    for _, rows in sorted(groups.items()):
-        assert all(r < current_ids.shape[0] for r in rows)
-        ids = current_ids[rows]
-        bs_r, seq_len = ids.shape
-
-        # align stop lengths to selected rows
-        batch_stop_lens = stop_lens[rows]
+    # Finalize outputs for unified batch
+    # 1. Padding for each sequence
+    seq_len = kt_ids.shape[1]
+    batch_stop_lens = stop_lens[orig_n_samples : orig_n_samples + kt_ids.shape[0]]
+    actual_seq_lens = torch.where(batch_stop_lens > 0, input_len + batch_stop_lens, seq_len)
+    position_indices = torch.arange(seq_len, device=kt_ids.device).unsqueeze(0)
+    should_pad = position_indices >= actual_seq_lens.unsqueeze(1)
+    kt_ids[should_pad] = pad_id
+    if orig_ids is not None:
+        batch_stop_lens = stop_lens[:orig_n_samples]
         actual_seq_lens = torch.where(batch_stop_lens > 0, input_len + batch_stop_lens, seq_len)
-        position_indices = torch.arange(seq_len, device=ids.device).unsqueeze(0).expand(bs_r, -1)
         should_pad = position_indices >= actual_seq_lens.unsqueeze(1)
-        ids[should_pad] = pad_id
+        orig_ids[should_pad] = pad_id
 
-        # Mirror the reordering into new branches
-        for old_idx in rows:
-            old_b = branch_info[old_idx]
-            new_idx = len(new_branches)
-            old_to_new[old_idx] = new_idx
-            new_branches.append(
-                Branch(
-                    parent=old_b.parent,  # temporarily old index; fix later
-                    birth_step=old_b.birth_step,
-                    children=set(),  # will rebuild after remap
-                    suppressed_num=old_b.suppressed_num,
-                    root=old_b.root,
-                )
-            )
-
+    # 2. Reorder sequences per root
+    all_seqs: list[torch.Tensor] = []
+    groups = branch_info.group_by_root()
+    for root, rows in sorted(groups.items()):
+        assert all(r < kt_ids.shape[0] for r in rows)
+        ids = kt_ids[rows]
+        bs_r, seq_len = ids.shape
+        all_root_seqs = [ids]
         # Fill to num_return_sequences if needed (duplicate first row of this root)
-        if config.fill_return_sequences and ids.shape[0] < config.num_return_sequences:
-            pad_seq = ids[0].unsqueeze(0).expand(config.num_return_sequences - bs_r, -1)
-            ids = torch.cat([ids, pad_seq], dim=0)
-
-            # Duplicate the first branch meta as well
-            dup_src_old_idx = rows[0]
-            src_b = branch_info[dup_src_old_idx]
-            for _ in range(config.num_return_sequences - bs_r):
-                new_branches.append(
-                    Branch(
-                        parent=src_b.parent,  # temporarily old index; fix later
-                        birth_step=src_b.birth_step,
-                        children=set(),  # rebuilt later
-                        suppressed_num=src_b.suppressed_num,
-                        root=src_b.root,
-                    )
-                )
-
-        sequences_per_root.append(ids)
-
-    # Remap parent indices to new indices and rebuild children sets
-    for b in new_branches:
-        if b.parent is not None:
-            # Map old parent index to new parent index
-            b.parent = old_to_new[b.parent]
-    # Rebuild children from parent links
-    for idx, b in enumerate(new_branches):
-        if b.parent is not None:
-            parent_idx = b.parent
-            new_branches[parent_idx].children.add(idx)
-
-    sequences = torch.cat(sequences_per_root, dim=0)
+        if config.fill_return_sequences and bs_r < kt_n_gen:
+            pad_seq = ids[0].unsqueeze(0).expand(kt_n_gen - bs_r, -1)
+            all_root_seqs.append(pad_seq)
+        # also merge orig seqs
+        if orig_ids is not None:
+            all_root_seqs.append(orig_ids[root * orig_n_gen : (root + 1) * orig_n_gen])
+        all_seqs.extend(all_root_seqs)
+    sequences = torch.cat(all_seqs, dim=0)
 
     return GenerateKeyTokenOutput(
         sequences=cast(torch.LongTensor, sequences),
         num_suppressed_branches=all_suppressed,
-        branch_info=BranchInfo.from_branch_list(new_branches),
         scheduler=kt_modules.sched,
         suppress_ratio=suppress_ratio,
         empty_branch_ratio=empty_branch_ratio,

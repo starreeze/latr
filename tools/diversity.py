@@ -160,7 +160,6 @@ class EvalWorker(MultiGPUWorker):
                     question_ids, tokenizer=tokenizer, attention_mask=attention_mask, **kwargs_gen
                 )
                 pred_raw: torch.Tensor = res.sequences
-                assert res.branch_info is not None
                 assert res.num_seq is not None
                 num_seq = res.num_seq / len(question_ids)
             else:

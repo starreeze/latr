@@ -189,13 +189,14 @@ class KeyTokenFilterList:
     def __call__(
         self, sequences: torch.Tensor, candidates: torch.Tensor, probs: torch.Tensor
     ) -> torch.Tensor:
-        "return shape: (batch, n_cand - 1) since the first token is always kept"
+        "return shape: (batch, n_cand) with the first token always kept"
         batch, n_cand = candidates.shape
         mask = torch.ones([batch, n_cand - 1], device=candidates.device, dtype=torch.bool)
         for filter in self.filters:
             mask = mask & filter(sequences, candidates, probs)
             if not mask.any():
                 break
+        mask = torch.cat([torch.ones([batch, 1], device=candidates.device, dtype=torch.bool), mask], dim=1)
         return mask
 
     def append(self, filter: KeyTokenFilter):

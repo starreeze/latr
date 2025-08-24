@@ -122,89 +122,51 @@ class BranchParamScheduler(BranchDynamicParam):
 @dataclass
 class GenerateKeyTokenOutput(GenerateDecoderOnlyOutput):
     num_suppressed_branches: int | None = None
-    branch_info: BranchInfo | None = None
     scheduler: BranchParamScheduler | None = None
     suppress_ratio: float | None = None
     empty_branch_ratio: float | None = None
     num_seq: int | None = None
 
 
-def duplicate_cache_for_sequence(cache: DynamicCache | None, source_idx: int) -> DynamicCache | None:
-    """
-    Helper function to duplicate a single sequence's cache state from a DynamicCache.
+class MixedCache:
+    def __init__(self, orig_n_samples: int, cache: DynamicCache | None = None) -> None:
+        self.orig_n_samples = orig_n_samples
+        self._dynamic: DynamicCache = cache if cache is not None else DynamicCache()
 
-    Args:
-        cache: The cache to duplicate from, or None
-        source_idx: The index of the source sequence in the batch
+    def to_dynamic(self) -> DynamicCache:
+        return self._dynamic
 
-    Returns:
-        A cache containing only the specified sequence's state, or None if input was None
-    """
-    if cache is None:
-        return None
+    def refresh(self, cache: DynamicCache) -> None:
+        self._dynamic = cache
 
-    # Create a new DynamicCache instance
-    new_cache = DynamicCache()
-    new_cache.key_cache = []
-    new_cache.value_cache = []
+    def append_dup_kt_rows(self, rows: list[int]) -> None:
+        if not rows:
+            return
+        key_cache = self._dynamic.key_cache
+        value_cache = self._dynamic.value_cache
+        if not key_cache:
+            return
+        batch_offset = self.orig_n_samples
+        for i in range(len(key_cache)):
+            k = key_cache[i]
+            v = value_cache[i]
+            idx = torch.tensor(rows, device=k.device, dtype=torch.long) + batch_offset
+            k_rows = k.index_select(0, idx)
+            v_rows = v.index_select(0, idx)
+            key_cache[i] = torch.cat([k, k_rows], dim=0)
+            value_cache[i] = torch.cat([v, v_rows], dim=0)
 
-    # Extract the cache for the specific sequence
-    for layer_idx in range(len(cache.key_cache)):
-        if cache.key_cache[layer_idx] is not None:
-            # Extract only the source sequence: (batch, heads, seq, dim) -> (1, heads, seq, dim)
-            key_tensor = cache.key_cache[layer_idx][source_idx : source_idx + 1]
-            new_cache.key_cache.append(key_tensor)
-
-        if cache.value_cache[layer_idx] is not None:
-            # Extract only the source sequence: (batch, heads, seq, dim) -> (1, heads, seq, dim)
-            value_tensor = cache.value_cache[layer_idx][source_idx : source_idx + 1]
-            new_cache.value_cache.append(value_tensor)
-
-    return new_cache
-
-
-def concatenate_caches(cache_list: list[DynamicCache | None]) -> DynamicCache | None:
-    """
-    Helper function to concatenate multiple caches along the batch dimension.
-
-    Args:
-        cache_list: list of caches to concatenate
-
-    Returns:
-        A single cache with concatenated batch dimensions, or None if all inputs are None
-    """
-    # Filter out None caches
-    valid_caches = [cache for cache in cache_list if cache is not None]
-
-    if not valid_caches:
-        return None
-
-    assert len(valid_caches) == len(cache_list)
-
-    # Create a new DynamicCache instance
-    new_cache = DynamicCache()
-    new_cache.key_cache = []
-    new_cache.value_cache = []
-
-    # Concatenate caches layer by layer
-    for layer_idx in range(len(valid_caches[0].key_cache)):
-        # Concatenate key caches for this layer
-        key_tensors = [
-            cache.key_cache[layer_idx] for cache in valid_caches if cache.key_cache[layer_idx] is not None
-        ]
-        if key_tensors:
-            concatenated_key = torch.cat(key_tensors, dim=0)  # Concatenate along batch dimension
-            new_cache.key_cache.append(concatenated_key)
-
-        # Concatenate value caches for this layer
-        value_tensors = [
-            cache.value_cache[layer_idx] for cache in valid_caches if cache.value_cache[layer_idx] is not None
-        ]
-        if value_tensors:
-            concatenated_value = torch.cat(value_tensors, dim=0)  # Concatenate along batch dimension
-            new_cache.value_cache.append(concatenated_value)
-
-    return new_cache
+    def apply_full_batch_mask(self, full_mask: Tensor) -> None:
+        key_cache = self._dynamic.key_cache
+        value_cache = self._dynamic.value_cache
+        if not key_cache:
+            return
+        device = key_cache[0].device
+        if full_mask.device != device:
+            full_mask = full_mask.to(device)
+        for i in range(len(key_cache)):
+            key_cache[i] = key_cache[i][full_mask]
+            value_cache[i] = value_cache[i][full_mask]
 
 
 @dataclass
@@ -355,10 +317,11 @@ class BranchInfo:
         self,
         sequence: Tensor,
         stop_lens: Tensor,
-        cache: DynamicCache | None,
+        cache: MixedCache,
         indices_to_remove: Iterable[int],
-        attention_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, DynamicCache | None, Tensor | None]:
+        attention_mask: Tensor,
+        orig_n_samples: int,
+    ) -> tuple[Tensor, Tensor, MixedCache, Tensor]:
         """
         Remove branches and their children from the sequence and cache, updating self states.
         """
@@ -370,33 +333,16 @@ class BranchInfo:
         mask = torch.ones(bs, dtype=torch.bool)
         mask[remove_list] = False
         new_sequence = sequence[mask]
-        new_bs = len(new_sequence)
-        stop_lens[:new_bs] = stop_lens[:bs][mask]
-        stop_lens[new_bs:] = 0
 
         new_attention_mask = None
         if attention_mask is not None:
             new_attention_mask = attention_mask[mask]
 
-        new_cache = None
-        if cache is not None:
-            # Create a new DynamicCache instance
-            new_cache = DynamicCache()
-            new_cache.key_cache = []
-            new_cache.value_cache = []
+        full_mask = torch.cat([torch.ones(orig_n_samples, dtype=torch.bool), mask])
+        new_bs = len(new_sequence) + orig_n_samples
+        stop_lens[:new_bs] = stop_lens[: orig_n_samples + bs][full_mask]
+        stop_lens[orig_n_samples + new_bs :] = 0
 
-            # Filter each layer's cache using the same mask
-            for layer_idx in range(len(cache.key_cache)):
-                # Only append key cache if it exists
-                if cache.key_cache[layer_idx] is not None:
-                    # Filter along batch dimension: (batch, heads, seq, dim) -> (filtered_batch, heads, seq, dim)
-                    filtered_key = cache.key_cache[layer_idx][mask]
-                    new_cache.key_cache.append(filtered_key)
+        cache.apply_full_batch_mask(full_mask)
 
-                # Only append value cache if it exists
-                if cache.value_cache[layer_idx] is not None:
-                    # Filter along batch dimension: (batch, heads, seq, dim) -> (filtered_batch, heads, seq, dim)
-                    filtered_value = cache.value_cache[layer_idx][mask]
-                    new_cache.value_cache.append(filtered_value)
-
-        return new_sequence, stop_lens, new_cache, new_attention_mask
+        return new_sequence, stop_lens, cache, new_attention_mask
