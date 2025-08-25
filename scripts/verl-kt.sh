@@ -52,5 +52,7 @@ python -m train.verl.run \
     kt.prob_filter_abs_thres=0.2 \
     kt.prob_filter_rel_thres=0.2 \
     kt.rollout_filter_edit_dist_thres=0.4 \
+    kt.rollout_filter_steps=[20,30,50] \
+    kt.mix_ratio_schedule={0:1.0,30:0.5,100:0} \
     kt.model_arch=$MODEL_ARCH \
     2>&1 | tee $EXPERIMENT_NAME.log

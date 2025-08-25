@@ -34,6 +34,10 @@ class BranchDynamicParam:
     model_filter_cand_thres: float | None = None  # the higher the more loose
     model_filter_rollout_thres: float | None = None  # the higher the more loose
 
+    # step-based params: in format step -> value
+    # how many kt seqs are mixed in the generation
+    mix_ratio_schedule: dict[int, float] = field(default_factory=lambda: {0: 1.0})
+
     # param scheduler
     enable_param_scheduler: bool = False
     param_scheduler_step: float = 0.01  # strength for each step
@@ -50,13 +54,12 @@ class BranchDynamicParam:
 class KeyTokenGenConfigMixin(BranchDynamicParam):
     output_hidden_states: bool = False
     max_n_branch_per_token: int = 2
-    mix_ratio: float = 1  # how many kt seqs are mixed in the generation
     # full: do sample only when branches are full; always: do sample whenever there is only one valid candidate
     sample_nk: Literal["none", "full", "always"] = "full"
     fill_return_sequences: bool = True
     # fallback to original generation for debug purpose
     # fill: fill all the branches at start and use the kt logic; native: explicit multinomial sampling
-    fallback_level: Literal["none", "fill", "native"] = "none"
+    fallback: bool = False
     sync_gpus: bool = False
 
     # filters
@@ -73,6 +76,11 @@ class KeyTokenGenConfig(KeyTokenGenConfigMixin, GenConfig):
 @dataclass
 class BranchParamScheduler(BranchDynamicParam):
     adjusted_steps: int = 0
+    current_step: int = 0
+
+    def __post_init__(self):
+        self.mix_ratio = self.mix_ratio_schedule.pop(0)
+        print(f"step {self.current_step} mix_ratio: {self.mix_ratio}")
 
     def _step_up(self):  # more strict
         if self.adjusted_steps >= self.max_n_step:
@@ -111,11 +119,20 @@ class BranchParamScheduler(BranchDynamicParam):
             self.model_filter_rollout_thres += self.param_scheduler_step
 
     def step(self, suppress_ratio: float, empty_branch_ratio: float):
+        # step based params
+        self.current_step += 1
+        if self.current_step in self.mix_ratio_schedule:
+            self.mix_ratio = self.mix_ratio_schedule.pop(self.current_step)
+        print(f"step {self.current_step} mix_ratio: {self.mix_ratio}")
+
+        # step up/down the filter params
         if self.enable_param_scheduler:
             if suppress_ratio > self.suppress_ratio_thres:
                 self._step_up()
+                print("step up")
             if empty_branch_ratio > self.empty_branch_ratio_thres:
                 self._step_down()
+                print("step down")
         return self
 
 

@@ -199,7 +199,7 @@ def handle_args():
 
     kwargs = {}
     for arg in kt_args:
-        k, v = arg.split("=")
+        k, v = arg.split("=", 1)
         kwargs[k.strip()] = v.strip()
 
     os.makedirs(os.path.dirname(kt_conf_path), exist_ok=True)
