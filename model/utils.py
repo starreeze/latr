@@ -40,6 +40,7 @@ class BranchDynamicParam:
 
     # param scheduler
     enable_param_scheduler: bool = False
+    freeze_sched_update: bool = False  # set to true in valid
     param_scheduler_step: float = 0.01  # strength for each step
     max_n_step: int = 10  # max number of steps allowed for dynamic tuning
     # step up (strict) the scheduler when the suppress ratio (n_suppressed / seq_len for each branch)
@@ -119,6 +120,9 @@ class BranchParamScheduler(BranchDynamicParam):
             self.model_filter_rollout_thres += self.param_scheduler_step
 
     def step(self, suppress_ratio: float, empty_branch_ratio: float):
+        if self.freeze_sched_update:
+            return
+
         # step based params
         self.current_step += 1
         if self.current_step in self.mix_ratio_schedule:

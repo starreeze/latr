@@ -73,7 +73,6 @@ def _init_generation_config(
     config = init_dataclass_from_dict(KeyTokenGenConfig, args_dict)
     assert config.use_cache
     assert config.output_hidden_states is False, "output hidden states is not supported"
-    assert config.num_return_sequences > 1, "num_return_sequences must be greater than 1"
 
     eos_id = cast(int, tokenizer.eos_token_id)
     pad_id = cast(int, tokenizer.pad_token_id)
@@ -81,22 +80,18 @@ def _init_generation_config(
     if attention_mask is None:
         attention_mask = input_ids != pad_id
 
-    interval = None
-    if input_ids.ndim == 1:
-        input_ids = input_ids.unsqueeze(0)
-        attention_mask = attention_mask.unsqueeze(0)
-    if input_ids.ndim == 2:
-        if input_ids.shape[0] != 1:
-            interval = get_repeat_interleave(input_ids)
-            if interval > 1 and interval != config.num_return_sequences:
-                raise ValueError(
-                    f"interval ({interval}) must match num_return_sequences ({config.num_return_sequences})"
-                )
+    assert input_ids.ndim == 2, f"input_ids must be 1D or 2D, got {input_ids.ndim}D"
+    interval = get_repeat_interleave(input_ids)
+
+    if interval == 1:
+        assert config.num_return_sequences > 1, "cannot perform kt generation on non-grouped inputs"
+    elif config.num_return_sequences == 1:
+        config.num_return_sequences = interval
     else:
-        raise ValueError(f"input_ids must be 1D or 2D, got {input_ids.ndim}D")
-    if interval is not None:
-        input_ids = input_ids[::interval]
-        attention_mask = attention_mask[::interval]
+        assert interval == config.num_return_sequences, "interval and n_seq do not match"
+
+    input_ids = input_ids[::interval]
+    attention_mask = attention_mask[::interval]
 
     # init constants
     # for common generation
@@ -144,6 +139,9 @@ def _init_generation_config(
             )
         else:
             rollout_filter = None
+
+        # always update freeze_sched_update according to the config
+        kt_modules.sched.freeze_sched_update = config.freeze_sched_update
 
     return (
         config,

@@ -29,6 +29,11 @@ python -m train.verl.run \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.name=kt \
     actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.val_kwargs.n=8 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
+    actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
+    actor_rollout_ref.rollout.val_kwargs.top_k=20 \
+    +actor_rollout_ref.rollout.micro_batch_size=256 \
     +actor_rollout_ref.rollout.unshard_fsdp_params=False \
     +actor_rollout_ref.rollout.offload_to_cpu=False \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
@@ -41,12 +46,11 @@ python -m train.verl.run \
     trainer.default_hdfs_dir=null \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
-    trainer.test_freq=-1 \
+    trainer.save_freq=50 \
+    trainer.test_freq=5 \
     trainer.project_name=SampleRL \
     trainer.experiment_name=$EXPERIMENT_NAME \
     kt.max_new_tokens=1024 \
-    kt.temperature=1.0 \
     kt.max_n_branch_per_token=2 \
     kt.enable_param_scheduler=False \
     kt.prob_filter_abs_thres=0.2 \

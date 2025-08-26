@@ -97,9 +97,14 @@ class KTRollout(BaseRollout):
 
         config = copy.copy(self.kt_config)
         if is_validate:
-            config.num_return_sequences = 1
+            config.fallback = config.freeze_sched_update = True
+            config.num_return_sequences = self.config.val_kwargs.n
+            for k in ["temperature", "top_k", "top_p"]:
+                setattr(config, k, getattr(self.config.val_kwargs, k))
         else:
             config.num_return_sequences = self.config.n
+            for k in ["temperature", "top_k", "top_p"]:
+                setattr(config, k, getattr(self.config, k))
 
         output = generate(
             self.infer_module,  # type: ignore
