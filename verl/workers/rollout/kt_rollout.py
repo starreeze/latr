@@ -97,7 +97,7 @@ class KTRollout(BaseRollout):
 
         config = copy.copy(self.kt_config)
         if is_validate:
-            config.fallback = config.freeze_sched_update = True
+            config.fallback = True
             config.num_return_sequences = self.config.val_kwargs.n
             for k in ["temperature", "top_k", "top_p"]:
                 setattr(config, k, getattr(self.config.val_kwargs, k))
@@ -114,6 +114,13 @@ class KTRollout(BaseRollout):
             attention_mask,
             config=config,
         )
+
+        assert self.kt_modules.sched is not None
+        if not is_validate:
+            self.kt_modules.sched.step(
+                prompts.meta_info["global_step"], output.suppress_ratio, output.empty_branch_ratio
+            )
+
         # TODO: filter out the seq with no answers like ds-chat
         seq = output.sequences
         generated_batch_size = seq.size(0)  # bs * num_return_sequences

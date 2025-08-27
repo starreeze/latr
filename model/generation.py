@@ -140,9 +140,6 @@ def _init_generation_config(
         else:
             rollout_filter = None
 
-        # always update freeze_sched_update according to the config
-        kt_modules.sched.freeze_sched_update = config.freeze_sched_update
-
     return (
         config,
         input_ids,
@@ -456,7 +453,6 @@ def generate(
     # Step scheduler
     suppress_ratio = all_suppressed / (bs_roots * config.num_return_sequences * config.max_new_tokens)
     empty_branch_ratio = 1 - len(branch_info) / (bs_roots * config.num_return_sequences)
-    kt_modules.sched.step(suppress_ratio, empty_branch_ratio)
 
     if orig_ids is not None:
         seq_len = orig_ids.shape[1]

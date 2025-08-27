@@ -40,7 +40,6 @@ class BranchDynamicParam:
 
     # param scheduler
     enable_param_scheduler: bool = False
-    freeze_sched_update: bool = False  # set to true in valid
     param_scheduler_step: float = 0.01  # strength for each step
     max_n_step: int = 10  # max number of steps allowed for dynamic tuning
     # step up (strict) the scheduler when the suppress ratio (n_suppressed / seq_len for each branch)
@@ -77,11 +76,10 @@ class KeyTokenGenConfig(KeyTokenGenConfigMixin, GenConfig):
 @dataclass
 class BranchParamScheduler(BranchDynamicParam):
     adjusted_steps: int = 0
-    current_step: int = 0
 
     def __post_init__(self):
         self.mix_ratio = self.mix_ratio_schedule.pop(0)
-        print(f"step {self.current_step} mix_ratio: {self.mix_ratio}")
+        print(f"step 0 mix_ratio: {self.mix_ratio}")
 
     def _step_up(self):  # more strict
         if self.adjusted_steps >= self.max_n_step:
@@ -119,18 +117,14 @@ class BranchParamScheduler(BranchDynamicParam):
         if self.model_filter_rollout_thres is not None:
             self.model_filter_rollout_thres += self.param_scheduler_step
 
-    def step(self, suppress_ratio: float, empty_branch_ratio: float):
-        if self.freeze_sched_update:
-            return
-
+    def step(self, global_step: int, suppress_ratio: float | None, empty_branch_ratio: float | None):
         # step based params
-        self.current_step += 1
-        if self.current_step in self.mix_ratio_schedule:
-            self.mix_ratio = self.mix_ratio_schedule.pop(self.current_step)
-        print(f"step {self.current_step} mix_ratio: {self.mix_ratio}")
+        if global_step in self.mix_ratio_schedule:
+            self.mix_ratio = self.mix_ratio_schedule.pop(global_step)
+        print(f"step {global_step} mix_ratio: {self.mix_ratio}")
 
         # step up/down the filter params
-        if self.enable_param_scheduler:
+        if self.enable_param_scheduler and suppress_ratio is not None and empty_branch_ratio is not None:
             if suppress_ratio > self.suppress_ratio_thres:
                 self._step_up()
                 print("step up")

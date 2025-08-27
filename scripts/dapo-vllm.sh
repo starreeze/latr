@@ -1,12 +1,12 @@
 DATA_DIR=dataset/countdown-base
 BASE_MODEL=/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B
 N_GPUS=8
-EXPERIMENT_NAME=kt-qwen2.5-3b-countdown
-MODEL_ARCH=qwen2
+EXPERIMENT_NAME=dapo-vllm-base
 
 python -m train.verl.run \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
+    +data.gen_batch_size=256 \
     data.train_batch_size=256 \
     data.max_prompt_length=256 \
     data.max_response_length=1024 \
@@ -16,8 +16,9 @@ python -m train.verl.run \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.model.path=$BASE_MODEL \
+    actor_rollout_ref.actor.clip_ratio_low=0.2 \
+    actor_rollout_ref.actor.clip_ratio_high=0.28 \
     actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.clip_ratio=0.2 \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.shuffle=True \
@@ -27,18 +28,21 @@ python -m train.verl.run \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-    actor_rollout_ref.rollout.name=kt \
+    actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.n=8 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
     actor_rollout_ref.rollout.val_kwargs.top_k=20 \
-    +actor_rollout_ref.rollout.micro_batch_size=256 \
-    +actor_rollout_ref.rollout.unshard_fsdp_params=False \
-    +actor_rollout_ref.rollout.offload_to_cpu=False \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.adv_estimator=grpo \
+    +algorithm.filter_groups.enable=True \
+    +algorithm.filter_groups.metric=acc \
+    +algorithm.filter_groups.max_num_gen_batches=10 \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
     trainer.total_epochs=1 \
@@ -46,17 +50,8 @@ python -m train.verl.run \
     trainer.default_hdfs_dir=null \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=50 \
-    trainer.test_freq=5 \
+    trainer.save_freq=-1 \
+    trainer.test_freq=10 \
     trainer.project_name=SampleRL \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    kt.max_new_tokens=1024 \
-    kt.max_n_branch_per_token=2 \
-    kt.enable_param_scheduler=False \
-    kt.prob_filter_abs_thres=0.2 \
-    kt.prob_filter_rel_thres=0.2 \
-    kt.rollout_filter_edit_dist_thres=0.4 \
-    kt.rollout_filter_steps=[20,30,50] \
-    kt.mix_ratio_schedule={0:1.0,30:0.5,100:0} \
-    kt.model_arch=$MODEL_ARCH \
     2>&1 | tee $EXPERIMENT_NAME.log
