@@ -30,6 +30,7 @@ python -m train.verl.run \
     actor_rollout_ref.rollout.name=kt \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.val_kwargs.n=8 \
+    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
     actor_rollout_ref.rollout.val_kwargs.top_k=20 \
@@ -41,12 +42,12 @@ python -m train.verl.run \
     algorithm.adv_estimator=grpo \
     trainer.critic_warmup=0 \
     trainer.logger=['wandb','console'] \
-    trainer.total_epochs=1 \
+    trainer.total_training_steps=500 \
     trainer.val_before_train=False \
     trainer.default_hdfs_dir=null \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=-1 \
+    trainer.save_freq=500 \
     trainer.test_freq=10 \
     trainer.project_name=SampleRL \
     trainer.experiment_name=$EXPERIMENT_NAME \

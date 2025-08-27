@@ -70,7 +70,11 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()  # (batch_size,)
 
-    return dict(response_mask=response_mask, prompt_length=prompt_length, response_length=response_length)
+    return dict(
+        response_mask=response_mask,
+        prompt_length=prompt_length,
+        response_length=response_length,
+    )
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
@@ -123,23 +127,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         return_diff_var = torch.var(valid_returns - valid_values)
         return_var = torch.var(valid_returns)
 
-    sample_score_dict = defaultdict(list)
-    for prompt_text, scores in zip(batch.batch["prompts_texts"], sequence_score, strict=True):
-        sample_score_dict[prompt_text].append(scores.item())
-    first_len = None
-    sample_score_stds = []
-    for scores in sample_score_dict.values():
-        if first_len is None:
-            first_len = len(scores)
-        else:
-            assert first_len == len(scores)
-        sample_score_stds.append(np.std(scores))
-    assert first_len is not None
-
     metrics = {
         # score
         "critic/score/mean": torch.mean(sequence_score).detach().item(),
-        "critic/score/mean_std": np.mean(sample_score_stds),
         "critic/score/max": torch.max(sequence_score).detach().item(),
         "critic/score/min": torch.min(sequence_score).detach().item(),
         # reward
@@ -177,9 +167,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "prompt_length/mean": torch.mean(prompt_length).detach().item(),
         "prompt_length/max": torch.max(prompt_length).detach().item(),
         "prompt_length/min": torch.min(prompt_length).detach().item(),
-        "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float())
-        .detach()
-        .item(),
+        "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
 
     # multi-turn conversation
@@ -429,8 +417,7 @@ def process_validation_metrics(
                         metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
                         if var2vals.get("pred", None) is not None:
                             vote_data = [
-                                {"val": val, "pred": pred}
-                                for val, pred in zip(var_vals, var2vals["pred"], strict=True)
+                                {"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"], strict=True)
                             ]
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
                                 data=vote_data,
