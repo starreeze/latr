@@ -16,7 +16,12 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from model.diverge import DivJudge
-from model.sample_filter import KeyTokenFilterList, ModelFilter, RolloutFilter, create_key_token_filter
+from model.sample_filter import (
+    KeyTokenFilterList,
+    ModelFilter,
+    create_key_token_filter,
+    create_sequence_filter,
+)
 from model.utils import (
     BranchInfo,
     BranchParamScheduler,
@@ -103,48 +108,54 @@ def _init_generation_config(
         logits_proc.append(TopKLogitsWarper(top_k=config.top_k))
     if config.top_p is not None and config.top_p < 1:
         logits_proc.append(TopPLogitsWarper(top_p=config.top_p))
+
     # for key token generation
     if config.fallback:
         print("fallback is True; key token generation is disabled")
-        key_token_filters = None
-        rollout_filter = None
+        key_token_filters = sequence_filters = None
     else:
         if kt_modules.sched is None:
             kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, config.__dict__)
-        key_token_filters = create_key_token_filter(
-            tokenizer=tokenizer,
-            embedding_module=model.get_input_embeddings(),
-            prob_filter_abs_thres=kt_modules.sched.prob_filter_abs_thres,
-            prob_filter_rel_thres=kt_modules.sched.prob_filter_rel_thres,
-            similarity_filter_thres=kt_modules.sched.similarity_filter_thres,
-            stop_word_filter=config.stop_word_filter,
-        )
-        if config.model_filter_path is not None and kt_modules.filter is None:
-            kt_modules.filter = DivJudge(config.model_filter_path)
-            kt_modules.filter.to(input_ids.device)
-            if kt_modules.sched.model_filter_cand_thres is not None:
-                key_token_filters.append(
-                    ModelFilter(tokenizer, kt_modules.filter, kt_modules.sched.model_filter_cand_thres)
-                )
-        # in rl the model may be set to train mode in the training loop, so keep it in eval mode
-        if kt_modules.filter is not None:
-            kt_modules.filter.eval()
-        if config.rollout_filter_edit_dist_thres is not None or config.model_filter_rollout_thres is not None:
-            rollout_filter = RolloutFilter(
+        kt_n_gen = round(config.num_return_sequences * kt_modules.sched.mix_ratio)
+        if kt_n_gen:
+            key_token_filters = create_key_token_filter(
+                tokenizer=tokenizer,
+                embedding_module=model.get_input_embeddings(),
+                prob_filter_abs_thres=kt_modules.sched.prob_filter_abs_thres,
+                prob_filter_rel_thres=kt_modules.sched.prob_filter_rel_thres,
+                similarity_filter_thres=kt_modules.sched.similarity_filter_thres,
+                stop_word_filter=config.stop_word_filter,
+            )
+            if config.model_filter_path is not None and kt_modules.filter is None:
+                kt_modules.filter = DivJudge(config.model_filter_path)
+                kt_modules.filter.to(input_ids.device)
+                if kt_modules.sched.model_filter_cand_thres is not None:
+                    key_token_filters.append(
+                        ModelFilter(tokenizer, kt_modules.filter, kt_modules.sched.model_filter_cand_thres)
+                    )
+            # in rl the model may be set to train mode in the training loop, so keep it in eval mode
+            if kt_modules.filter is not None:
+                kt_modules.filter.eval()
+            sequence_filters = create_sequence_filter(
+                tokenizer,
+                kt_n_gen,
                 config.rollout_filter_steps,
                 kt_modules.sched.rollout_filter_edit_dist_thres,
                 kt_modules.sched.model_filter_rollout_thres,
-                tokenizer,
-                kt_modules.filter if kt_modules.sched.model_filter_rollout_thres is not None else None,
+                kt_modules.sched.cumulative_prob_filter_thres,
+                config.cumulative_prob_filter_interval,
+                kt_modules.filter,
+                config.token_filter_keep_math,
             )
         else:
-            rollout_filter = None
+            print("kt_n_gen is 0; key token generation is disabled")
+            key_token_filters = sequence_filters = None
 
     return (
         config,
         input_ids,
         attention_mask,
-        rollout_filter,
+        sequence_filters,
         key_token_filters,
         stopping_criteria,
         logits_proc,
@@ -225,6 +236,7 @@ def _sample_new_sequence_with_rollout(
         branch.suppressed_num += int(sup_num)
 
     # 5) Build new tokens and genealogy
+    logps = (probs + 1e-9).log()
     new_tokens_on_original_branch: list[int] = []
     new_branch_seqs: list[torch.Tensor] = []
     new_branch_attn: list[torch.Tensor] = []
@@ -238,6 +250,7 @@ def _sample_new_sequence_with_rollout(
         row_candidates = topk_ids[row]
         row_mask = sample_masks[row]
         valid_cands = row_candidates[row_mask == 0]
+        assert len(valid_cands), "At least one candidate should be valid"
         # perform sampling for those has only one valid candidate
         if len(valid_cands) == 1 and (
             sample_nk == "always"
@@ -246,13 +259,13 @@ def _sample_new_sequence_with_rollout(
             # here prob is already processed by logits_proc
             new_token = int(torch.multinomial(probs[row], num_samples=1).item())
             new_tokens_on_original_branch.append(new_token)
+            branch_info[row].accumulated_logp += logps[row, new_token].item()
             continue
-        assert len(valid_cands), "At least one candidate should be valid"
-        for cand_idx, cand in enumerate(valid_cands.tolist()):
-            if cand_idx == 0:
-                new_tokens_on_original_branch.append(int(cand))
-                continue
-            branch_info.add_branch(row, current_step)
+
+        # process minor candidates before the first (major) one to avoid messing up with the accumulated prob
+        for cand in valid_cands.tolist()[1:]:
+            new_branch = branch_info.add_branch(row, current_step)
+            new_branch.accumulated_logp += logps[row, cand].item()
             # prepare new sequence and cache for the new branch
             nt_tensor = torch.tensor([[cand]], device=device, dtype=current_ids.dtype)
             new_seq = torch.cat([current_ids[row : row + 1, :], nt_tensor], dim=1)
@@ -266,8 +279,14 @@ def _sample_new_sequence_with_rollout(
                 dim=1,
             )
             new_branch_attn.append(new_attn_row)
-            # Defer duplicating cache rows for these new branches
+            # Defer duplicating cache rows for these new branches for efficiency
             dup_kt_rows.append(row)
+
+        major_cand = int(valid_cands[0].item())
+        new_tokens_on_original_branch.append(major_cand)
+        branch_info[row].accumulated_logp += logps[row, major_cand].item()
+        continue
+
     assert len(new_tokens_on_original_branch) == len(current_ids)
     assert len(new_branch_seqs) == len(new_branch_attn)
     assert len(new_branch_seqs) + len(current_ids) == (sample_masks == 0).sum()
@@ -319,7 +338,7 @@ def generate(
     If the number of branches exceeds num_return_sequences, the branches with lower probability are suppressed.
     """
     # init config & constants
-    config, input_ids, attention_mask, rollout_filter, key_token_filters, stopping_criteria, logits_proc = (
+    config, input_ids, attention_mask, sequence_filters, key_token_filters, stopping_criteria, logits_proc = (
         _init_generation_config(
             model, tokenizer, input_ids, attention_mask, config, stopping_criteria, kt_modules, kwargs
         )
@@ -374,8 +393,8 @@ def generate(
             logits_to_keep=1,
         )
 
-        branching_start = time.time()
-        times["forward"] += branching_start - forward_start
+        prob_start = time.time()
+        times["forward"] += prob_start - forward_start
 
         assert outputs.past_key_values is not None
         cache = MixedCache(orig_n_samples, outputs.past_key_values)
@@ -387,6 +406,9 @@ def generate(
         logits_u = logits_proc(cast(torch.LongTensor, full_ids), cast(torch.FloatTensor, logits))
         probs = torch.softmax(logits_u, dim=-1)
 
+        sample_start = time.time()
+        times["prob"] += sample_start - prob_start
+
         if orig_ids is not None:
             assert orig_mask is not None
             orig_probs = probs[:orig_n_samples]
@@ -394,6 +416,10 @@ def generate(
             orig_ids = torch.cat([orig_ids, new_tokens], dim=1)
             new_attn_mask = torch.ones((orig_ids.shape[0], 1), device=orig_ids.device, dtype=orig_mask.dtype)
             orig_mask = torch.cat([orig_mask, new_attn_mask], dim=1)
+
+            orig_end = time.time()
+            times["orig_sample"] += orig_end - sample_start
+            sample_start = orig_end
 
         if kt_n_gen:
             assert kt_ids is not None and kt_mask is not None
@@ -417,17 +443,23 @@ def generate(
                 config.sync_gpus,
             )
 
+            filter_start = time.time()
+            times["kt_sample"] += filter_start - sample_start
+
             # Rollout filtering
-            if rollout_filter is not None:
+            if sequence_filters is not None:
                 completion_ids = kt_ids[:, input_len:]
-                remove_set = rollout_filter.get_remove_indices(completion_ids, branch_info, step + 1, eos_id)
+                remove_set = sequence_filters(completion_ids, branch_info, step + 1)
                 kt_ids, stop_lens, cache, new_attn = branch_info.remove(
                     kt_ids, stop_lens, cache, remove_set, kt_mask, orig_n_samples
                 )
                 if new_attn is not None:
                     kt_mask = new_attn
 
+            times["kt_seq_filter"] += time.time() - filter_start
+
         # stopping criteria
+        stop_start = time.time()
         full_ids = maybe_cat_org_kt(orig_ids, kt_ids)
         all_done = True
         should_stop = stopping_criteria(full_ids, logits_u)  # type: ignore
@@ -443,7 +475,7 @@ def generate(
                 suppressed=all_suppressed, branches=branch_info.get_root_branches_repr()
             )
 
-        times["branching"] += time.time() - branching_start
+        times["stop_criteria"] += time.time() - stop_start
 
         if all_done and not config.sync_gpus:
             break
@@ -465,7 +497,7 @@ def generate(
     if kt_n_gen == 0:
         return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, orig_ids))
 
-    # Finalize outputs for unified batch
+    # pad for kt_ids
     assert kt_ids is not None
     seq_len = kt_ids.shape[1]
     batch_stop_lens = stop_lens[orig_n_samples : orig_n_samples + kt_ids.shape[0]]

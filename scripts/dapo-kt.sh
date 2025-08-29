@@ -7,7 +7,7 @@ MODEL_ARCH=qwen2
 python -m train.verl.run \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
-    +data.gen_batch_size=256 \
+    +data.gen_batch_size=384 \
     data.train_batch_size=256 \
     data.max_prompt_length=256 \
     data.max_response_length=1024 \
@@ -36,7 +36,6 @@ python -m train.verl.run \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
     actor_rollout_ref.rollout.val_kwargs.top_k=20 \
-    +actor_rollout_ref.rollout.micro_batch_size=256 \
     +actor_rollout_ref.rollout.unshard_fsdp_params=False \
     +actor_rollout_ref.rollout.offload_to_cpu=False \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
@@ -63,6 +62,6 @@ python -m train.verl.run \
     kt.prob_filter_rel_thres=0.2 \
     kt.rollout_filter_edit_dist_thres=0.4 \
     kt.rollout_filter_steps="[20,30,50]" \
-    kt.mix_ratio_schedule="{0:0.5,100:0}" \
+    kt.mix_ratio_schedule="{0:1,15:0.5,60:0}" \
     kt.model_arch=$MODEL_ARCH \
     2>&1 | tee $EXPERIMENT_NAME.log

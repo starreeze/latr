@@ -33,6 +33,7 @@ class BranchDynamicParam:
     rollout_filter_edit_dist_thres: float | None = None
     model_filter_cand_thres: float | None = None  # the higher the more loose
     model_filter_rollout_thres: float | None = None  # the higher the more loose
+    cumulative_prob_filter_thres: float | None = None  # the higher the more loose
 
     # step-based params: in format step -> value
     # how many kt seqs are mixed in the generation
@@ -66,6 +67,8 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     stop_word_filter: bool = False
     model_filter_path: str | None = None
     rollout_filter_steps: list[int] = field(default_factory=lambda: [30, 50])
+    cumulative_prob_filter_interval: int = 10
+    token_filter_keep_math: bool = True
 
 
 @dataclass
@@ -198,6 +201,7 @@ class Branch:
     root: int
     birth_step: int
     children: set[int] = field(default_factory=set)
+    accumulated_logp: float = 0
     suppressed_num: int = 0
 
 
@@ -221,12 +225,15 @@ class BranchInfo:
         return res
 
     def __repr__(self) -> str:
-        head = "   idx parent  birth   root    children"
+        head = "   idx parent  birth   root   acc_logp    children"
         lines = [head]
         for i, b in enumerate(self.branches):
             children = ", ".join(str(c) for c in b.children)
             parent_idx = b.parent if b.parent is not None else "None"
-            lines.append(f"{i:>6} {parent_idx:>6} {b.birth_step:>6} {b.root:>6}    {children}")
+            lines.append(
+                f"{i:>6} {parent_idx:>6} {b.birth_step:>6} "
+                f"{b.root:>6} {b.accumulated_logp:10.2f}    {children}"
+            )
         return "\n".join(lines)
 
     def add_branch(self, parent: int, birth_step: int):
@@ -234,9 +241,16 @@ class BranchInfo:
         if parent < 0 or parent >= len(self.branches):
             raise ValueError(f"Invalid parent_idx {parent}. Must be in range [0, {len(self.branches)})")
 
-        new_branch = Branch(parent, self.branches[parent].root, birth_step)
+        new_branch = Branch(
+            parent,
+            self.branches[parent].root,
+            birth_step,
+            accumulated_logp=self.branches[parent].accumulated_logp,
+        )
         self.branches.append(new_branch)
         self.branches[parent].children.add(len(self.branches) - 1)
+
+        return new_branch
 
     def __getitem__(self, idx) -> Branch:
         return self.branches[idx]

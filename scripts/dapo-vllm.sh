@@ -6,7 +6,7 @@ EXPERIMENT_NAME=dapo-vllm-base
 python -m train.verl.run \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
-    +data.gen_batch_size=256 \
+    +data.gen_batch_size=384 \
     data.train_batch_size=256 \
     data.max_prompt_length=256 \
     data.max_response_length=1024 \

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
-from typing import Iterable, Optional
+from typing import Iterable, Optional, cast
 
 import nltk
 import torch
@@ -15,6 +16,8 @@ math_core_symbols = "+-*/\\<>=()[]{}_^&%$0123456789"
 
 
 class KeyTokenFilter(ABC):
+    "filters that determine whether new branches should be sprinted up at a specific token"
+
     def __init__(self, tokenizer: PreTrainedTokenizer):
         self.tokenizer = tokenizer
 
@@ -209,7 +212,16 @@ class KeyTokenFilterList:
         return self.filters[idx]
 
 
-class RolloutFilter:
+class SequenceFilter(ABC):
+    "sequence based filter: determine whether a sequence should be deleted"
+
+    @abstractmethod
+    def __call__(self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int) -> set[int]:
+        "return remove indices"
+        pass
+
+
+class RolloutFilter(SequenceFilter):
     """
     Rollout filter that applies edit distance comparison between sequences from sibling branches.
     """
@@ -230,10 +242,9 @@ class RolloutFilter:
         self.tokenizer = tokenizer
         self.collator = DivCollator(tokenizer)
         self.keep_math_core_symbols = keep_math_core_symbols
+        self.eos_id = cast(int, tokenizer.eos_token_id)
 
-    def get_remove_indices(
-        self, completion_ids: torch.Tensor, branch_info: BranchInfo, current_step: int, eos_id: int
-    ) -> set[int]:
+    def __call__(self, completion_ids: torch.Tensor, branch_info: BranchInfo, current_step: int) -> set[int]:
         """
         Apply rollout filter by comparing edit distances and model scores of sequences from branches
         created `rollout_filter_steps` steps ago.
@@ -260,7 +271,7 @@ class RolloutFilter:
 
             a = completion_ids[idx, -length:]
             b = completion_ids[parent_idx, -length:]
-            if torch.any((a == eos_id) | (b == eos_id)):
+            if torch.any((a == self.eos_id) | (b == self.eos_id)):
                 continue
             model_batch.append({"prefix": prefix, "a": a, "b": b})
             meta.append((idx, length))
@@ -291,6 +302,60 @@ class RolloutFilter:
                     remove_set.add(idx)
 
         return remove_set
+
+
+class CumulativeProbFilter(SequenceFilter):
+    def __init__(
+        self,
+        cumulative_prob_filter_thres: float,
+        cumulative_prob_filter_interval: int,
+        eos_id: int,
+        kt_n_gen: int,
+    ):
+        self.interval = cumulative_prob_filter_interval
+        self.log_thres = math.log(cumulative_prob_filter_thres)
+        self.eos_id = eos_id
+        self.kt_n_gen = kt_n_gen
+
+    def __call__(self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int) -> set[int]:
+        if current_step % self.interval:
+            return set()
+
+        remove_set: set[int] = set()
+        has_eos = (sequences == self.eos_id).any(dim=-1)
+        for group in branch_info.group_by_root().values():
+            if len(group) == self.kt_n_gen:
+                continue  # skip those that are already full
+            max_p = max(branch_info[i].accumulated_logp for i in group)
+            for idx in group:
+                if has_eos[idx]:
+                    continue
+                b = branch_info[idx]
+                # always keep roots
+                if b.parent is not None and b.accumulated_logp - max_p < self.log_thres * current_step:
+                    remove_set.add(idx)
+
+        return remove_set
+
+
+class SequenceFilterList:
+    def __init__(self, filters: Iterable[SequenceFilter]):
+        self.filters = list(filters)
+
+    def __call__(self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int) -> set[int]:
+        remove_set: set[int] = set()
+        for filter in self.filters:
+            remove_set.update(filter(sequences, branch_info, current_step))
+        return remove_set
+
+    def append(self, filter: SequenceFilter):
+        self.filters.append(filter)
+
+    def __len__(self) -> int:
+        return len(self.filters)
+
+    def __getitem__(self, idx):
+        return self.filters[idx]
 
 
 def create_key_token_filter(
@@ -332,3 +397,39 @@ def create_key_token_filter(
         raise ValueError("No filters provided")
 
     return KeyTokenFilterList(filters)
+
+
+def create_sequence_filter(
+    tokenizer: PreTrainedTokenizer,
+    kt_n_gen: int,
+    rollout_filter_steps: list[int],
+    rollout_filter_edit_dist_thres: float | None,
+    model_filter_thres: float | None,
+    cumulative_prob_filter_thres: float | None,
+    cumulative_prob_filter_interval: int,
+    filter_model: DivJudge | None,
+    keep_math_core_symbols: bool,
+) -> SequenceFilterList:
+    filters = []
+
+    if rollout_filter_edit_dist_thres is not None or model_filter_thres is not None:
+        rollout_filter = RolloutFilter(
+            rollout_filter_steps,
+            rollout_filter_edit_dist_thres,
+            model_filter_thres,
+            tokenizer,
+            filter_model,
+            keep_math_core_symbols,
+        )
+        filters.append(rollout_filter)
+
+    if cumulative_prob_filter_thres is not None:
+        cumulative_prob_filter = CumulativeProbFilter(
+            cumulative_prob_filter_thres,
+            cumulative_prob_filter_interval,
+            cast(int, tokenizer.eos_token_id),
+            kt_n_gen,
+        )
+        filters.append(cumulative_prob_filter)
+
+    return SequenceFilterList(filters)

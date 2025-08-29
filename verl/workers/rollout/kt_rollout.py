@@ -118,7 +118,7 @@ class KTRollout(BaseRollout):
         assert self.kt_modules.sched is not None
         if not is_validate:
             self.kt_modules.sched.step(
-                prompts.meta_info["global_step"], output.suppress_ratio, output.empty_branch_ratio
+                prompts.meta_info["global_steps"], output.suppress_ratio, output.empty_branch_ratio
             )
 
         # TODO: filter out the seq with no answers like ds-chat
