@@ -51,7 +51,6 @@ python -m train.verl.run \
     trainer.test_freq=10 \
     trainer.project_name=SampleRL \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    kt.max_new_tokens=1024 \
     kt.max_n_branch_per_token=2 \
     kt.enable_param_scheduler=False \
     kt.prob_filter_abs_thres=0.2 \

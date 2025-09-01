@@ -3,11 +3,11 @@ import copy
 from typing import cast
 
 import torch
-import torch.distributed
 import yaml
 from tensordict import TensorDict
 from torch import nn
-from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+from torch.amp.autocast_mode import autocast
+from torch.distributed.fsdp.api import FullStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -58,7 +58,11 @@ class KTRollout(BaseRollout):
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         batch_size = prompts.batch.batch_size[0]
-        num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
+        if prompts.meta_info.get("validate", False):
+            mbs = self.config.val_kwargs.get("micro_batch_size", batch_size)
+        else:
+            mbs = self.config.get("micro_batch_size", batch_size)
+        num_chunks = max((batch_size + mbs - 1) // mbs, 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
 
         if self.unshard_fsdp_params:
@@ -77,7 +81,7 @@ class KTRollout(BaseRollout):
         if self.unshard_fsdp_params and len(batch_prompts) > 0:
             sample_idx = batch_prompts[0].batch["input_ids"].device
             self.infer_module.to(device=sample_idx)
-        with torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
+        with autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             output = [self._generate_minibatch(p) for p in batch_prompts]
         if self.unshard_fsdp_params:
             self.infer_module.to("cpu")
@@ -105,6 +109,7 @@ class KTRollout(BaseRollout):
             config.num_return_sequences = self.config.n
             for k in ["temperature", "top_k", "top_p"]:
                 setattr(config, k, getattr(self.config, k))
+        config.max_new_tokens = self.config.response_length
 
         output = generate(
             self.infer_module,  # type: ignore

@@ -177,17 +177,22 @@ def _sample_new_sequence_with_rollout(
     input_len: int,
     eos_id: int,
     sync_gpus: bool,
-) -> tuple[torch.Tensor, torch.Tensor, MixedCache]:
+) -> tuple[torch.Tensor, torch.Tensor, MixedCache, dict[str, float]]:
     """
     Unified batched sampling and branching across all roots.
     Maintains a single current_ids tensor and a single BranchInfo with multiple roots.
     """
+    times = {}
+    topk_start = time.time()
 
     device = current_ids.device
     batch_size = current_ids.shape[0]
 
     # 1) Compute top-k for all rows
     topk_probs, topk_ids = probs.topk(max_n_branch_per_token, dim=-1)  # (bs, max_n_branch)
+
+    sample_mask_start = time.time()
+    times["kt_sample/topk"] = sample_mask_start - topk_start
 
     # 2) Build variable-length prefix-trimmed sequences for valid (non-complete) rows
     valid_rows = torch.nonzero(~complete_mask, as_tuple=False).squeeze(-1)
@@ -198,7 +203,7 @@ def _sample_new_sequence_with_rollout(
         current_ids = torch.cat([current_ids, pad_tensor], dim=1)
         ones_col = torch.ones((batch_size, 1), device=device, dtype=attention_mask.dtype)
         attention_mask = torch.cat([attention_mask, ones_col], dim=1)
-        return current_ids, attention_mask, cache
+        return current_ids, attention_mask, cache, times
 
     global_valid_ids = current_ids[valid_rows, input_len:]
     global_valid_topk_ids = topk_ids[valid_rows]
@@ -212,6 +217,9 @@ def _sample_new_sequence_with_rollout(
     # first candidate is always valid for both non-complete and complete rows
     sample_masks[:, 0] = 0
     # NOTE: it is possible to put aside the finished sequences and make space for more branches
+
+    capacity_assign_start = time.time()
+    times["kt_sample/sample_mask"] = capacity_assign_start - sample_mask_start
 
     # 4) Per-root capacity: group sequences by root and calc cap independently
     groups = branch_info.group_by_root()
@@ -234,6 +242,9 @@ def _sample_new_sequence_with_rollout(
     assert (sample_masks == 0).sum() <= num_return_sequences * len(groups)
     for branch, sup_num in zip(branch_info, (sample_masks == 2).sum(dim=1)):
         branch.suppressed_num += int(sup_num)
+
+    new_token_branch_start = time.time()
+    times["kt_sample/capacity_assign"] = new_token_branch_start - capacity_assign_start
 
     # 5) Build new tokens and genealogy
     logps = (probs + 1e-9).log()
@@ -291,6 +302,9 @@ def _sample_new_sequence_with_rollout(
     assert len(new_branch_seqs) == len(new_branch_attn)
     assert len(new_branch_seqs) + len(current_ids) == (sample_masks == 0).sum()
 
+    cat_id_start = time.time()
+    times["kt_sample/new_token_branch"] = cat_id_start - new_token_branch_start
+
     # 6) Append new tokens for original branches
     new_ids_col = torch.tensor(
         new_tokens_on_original_branch, dtype=current_ids.dtype, device=device
@@ -300,14 +314,19 @@ def _sample_new_sequence_with_rollout(
     ones_col = torch.ones((batch_size, 1), device=device, dtype=attention_mask.dtype)
     attention_mask = torch.cat([attention_mask, ones_col], dim=1)
 
+    cat_cache_start = time.time()
+    times["kt_sample/cat_id"] = cat_cache_start - cat_id_start
+
     # 7) Concatenate new sequences and caches
     if new_branch_seqs:
         current_ids = torch.cat([current_ids, *new_branch_seqs])
         attention_mask = torch.cat([attention_mask, *new_branch_attn])
         cache.append_dup_kt_rows(dup_kt_rows)
 
+    times["kt_sample/cat_cache"] = time.time() - cat_cache_start
+
     assert len(current_ids) == len(attention_mask) == (sample_masks == 0).sum()
-    return current_ids, attention_mask, cache
+    return current_ids, attention_mask, cache, times
 
 
 def maybe_cat_org_kt(orig: torch.Tensor | None, kt: torch.Tensor | None, dim=0) -> torch.Tensor:
@@ -426,7 +445,7 @@ def generate(
             assert key_token_filters is not None
             kt_probs = probs[orig_n_samples:]
             complete_mask = stop_lens[orig_n_samples : orig_n_samples + kt_ids.shape[0]] != 0
-            kt_ids, kt_mask, cache = _sample_new_sequence_with_rollout(
+            kt_ids, kt_mask, cache, kt_times = _sample_new_sequence_with_rollout(
                 key_token_filters,
                 kt_probs,
                 kt_ids,
@@ -442,6 +461,8 @@ def generate(
                 eos_id,
                 config.sync_gpus,
             )
+            for k, v in kt_times.items():
+                times[k] += v
 
             filter_start = time.time()
             times["kt_sample"] += filter_start - sample_start
@@ -449,14 +470,22 @@ def generate(
             # Rollout filtering
             if sequence_filters is not None:
                 completion_ids = kt_ids[:, input_len:]
-                remove_set = sequence_filters(completion_ids, branch_info, step + 1)
-                kt_ids, stop_lens, cache, new_attn = branch_info.remove(
+                remove_set, sf_times = sequence_filters(completion_ids, branch_info, step + 1)
+
+                for k, v in sf_times.items():
+                    times[k] += v
+                update_remove_start = time.time()
+                times["kt_seq_filter"] += update_remove_start - filter_start
+
+                kt_ids, stop_lens, cache, new_attn, rm_times = branch_info.remove(
                     kt_ids, stop_lens, cache, remove_set, kt_mask, orig_n_samples
                 )
+                for k, v in rm_times.items():
+                    times[k] += v
                 if new_attn is not None:
                     kt_mask = new_attn
 
-            times["kt_seq_filter"] += time.time() - filter_start
+                times["kt_update_remove"] += time.time() - update_remove_start
 
         # stopping criteria
         stop_start = time.time()

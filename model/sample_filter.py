@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from abc import ABC, abstractmethod
 from typing import Iterable, Optional, cast
 
@@ -123,6 +124,7 @@ class StopWordFilter(KeyTokenFilter):
 
         for sample_idx, candidate in enumerate(candidates):
             for token_idx, token_id in enumerate(candidate[1:]):
+                token_id = int(token_id.item())
                 # keep the first token, otherwise stop words will never be sampled out
                 if token_id == -1:
                     continue
@@ -342,11 +344,17 @@ class SequenceFilterList:
     def __init__(self, filters: Iterable[SequenceFilter]):
         self.filters = list(filters)
 
-    def __call__(self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int) -> set[int]:
+    def __call__(
+        self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int
+    ) -> tuple[set[int], dict[str, float]]:
         remove_set: set[int] = set()
+        times = {}
         for filter in self.filters:
+            start = time.time()
             remove_set.update(filter(sequences, branch_info, current_step))
-        return remove_set
+            name = f"kt_seq_filter/{filter.__class__.__name__}"
+            times[name] = time.time() - start
+        return remove_set, times
 
     def append(self, filter: SequenceFilter):
         self.filters.append(filter)

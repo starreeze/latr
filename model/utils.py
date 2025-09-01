@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterable, Literal
@@ -350,10 +351,16 @@ class BranchInfo:
         indices_to_remove: Iterable[int],
         attention_mask: Tensor,
         orig_n_samples: int,
-    ) -> tuple[Tensor, Tensor, MixedCache, Tensor]:
+    ) -> tuple[Tensor, Tensor, MixedCache, Tensor, dict[str, float]]:
         """
         Remove branches and their children from the sequence and cache, updating self states.
         """
+        if not indices_to_remove:
+            return sequence, stop_lens, cache, attention_mask, {}
+
+        times = {}
+        branch_start = time.time()
+
         remove_set = self._get_recursive_remove_indices(indices_to_remove)
         self._remove_branches(remove_set)
 
@@ -361,17 +368,24 @@ class BranchInfo:
         bs = len(sequence)
         mask = torch.ones(bs, dtype=torch.bool)
         mask[remove_list] = False
-        new_sequence = sequence[mask]
 
+        id_start = time.time()
+        times["kt_update_remove/branch"] = id_start - branch_start
+
+        new_sequence = sequence[mask]
         new_attention_mask = None
         if attention_mask is not None:
             new_attention_mask = attention_mask[mask]
-
         full_mask = torch.cat([torch.ones(orig_n_samples, dtype=torch.bool), mask])
         new_bs = len(new_sequence) + orig_n_samples
         stop_lens[:new_bs] = stop_lens[: orig_n_samples + bs][full_mask]
         stop_lens[orig_n_samples + new_bs :] = 0
 
+        cache_start = time.time()
+        times["kt_update_remove/id"] = cache_start - id_start
+
         cache.apply_full_batch_mask(full_mask)
 
-        return new_sequence, stop_lens, cache, new_attention_mask
+        times["kt_update_remove/cache"] = time.time() - cache_start
+
+        return new_sequence, stop_lens, cache, new_attention_mask, times
