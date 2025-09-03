@@ -492,13 +492,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             device_name, mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"]
         )
         rollout_name = self.config.rollout.name
-        if rollout_name == "hf":
-            from verl.workers.rollout import HFRollout
+
+        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! start modify
+        if rollout_name == "kt":
+            from verl.workers.rollout.kt_rollout import KTRollout
             from verl.workers.sharding_manager.base import BaseShardingManager
 
-            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
+            rollout = KTRollout(self.actor_module_fsdp, self.config.model.path, config=self.config.rollout)
             rollout_sharding_manager = BaseShardingManager()
-            # TODO: a sharding manager that do nothing?
+        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! end modify
 
         elif rollout_name == "vllm":
             from verl.workers.rollout.vllm_rollout import vLLMRollout
@@ -578,15 +580,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 multi_stage_wake_up=self.config.rollout.multi_stage_wake_up,
             )
             log_gpu_memory_usage("After building sharding manager", logger=logger)
-
-        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! start modify
-        elif rollout_name == "kt":
-            from verl.workers.rollout.kt_rollout import KTRollout
-            from verl.workers.sharding_manager.base import BaseShardingManager
-
-            rollout = KTRollout(self.actor_module_fsdp, self.config.model.path, config=self.config.rollout)
-            rollout_sharding_manager = BaseShardingManager()
-        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! end modify
 
         else:
             raise NotImplementedError(f"Rollout name: {self.config.rollout.name} is not supported")

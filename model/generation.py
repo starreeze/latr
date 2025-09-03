@@ -1,9 +1,11 @@
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Literal, cast
 
 import torch
+import torch.distributed as dist
 from tqdm import tqdm
 from transformers.generation.logits_process import (
     LogitsProcessorList,
@@ -79,6 +81,15 @@ def _init_generation_config(
     assert config.use_cache
     assert config.output_hidden_states is False, "output hidden states is not supported"
 
+    if kt_modules.sched is None:
+        kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, config.__dict__)
+    kt_n_gen = round(config.num_return_sequences * kt_modules.sched.mix_ratio)
+
+    # for key token generation
+    if config.fallback or kt_n_gen == 0:
+        print("fallback is True or kt_n_gen is 0; key token generation is disabled")
+        return config, input_ids, attention_mask, None, None, None, None
+
     eos_id = cast(int, tokenizer.eos_token_id)
     pad_id = cast(int, tokenizer.pad_token_id)
 
@@ -109,47 +120,35 @@ def _init_generation_config(
     if config.top_p is not None and config.top_p < 1:
         logits_proc.append(TopPLogitsWarper(top_p=config.top_p))
 
-    # for key token generation
-    if config.fallback:
-        print("fallback is True; key token generation is disabled")
-        key_token_filters = sequence_filters = None
-    else:
-        if kt_modules.sched is None:
-            kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, config.__dict__)
-        kt_n_gen = round(config.num_return_sequences * kt_modules.sched.mix_ratio)
-        if kt_n_gen:
-            key_token_filters = create_key_token_filter(
-                tokenizer=tokenizer,
-                embedding_module=model.get_input_embeddings(),
-                prob_filter_abs_thres=kt_modules.sched.prob_filter_abs_thres,
-                prob_filter_rel_thres=kt_modules.sched.prob_filter_rel_thres,
-                similarity_filter_thres=kt_modules.sched.similarity_filter_thres,
-                stop_word_filter=config.stop_word_filter,
+    key_token_filters = create_key_token_filter(
+        tokenizer=tokenizer,
+        embedding_module=model.get_input_embeddings(),
+        prob_filter_abs_thres=kt_modules.sched.prob_filter_abs_thres,
+        prob_filter_rel_thres=kt_modules.sched.prob_filter_rel_thres,
+        similarity_filter_thres=kt_modules.sched.similarity_filter_thres,
+        stop_word_filter=config.stop_word_filter,
+    )
+    if config.model_filter_path is not None and kt_modules.filter is None:
+        kt_modules.filter = DivJudge(config.model_filter_path)
+        kt_modules.filter.to(input_ids.device)
+        if kt_modules.sched.model_filter_cand_thres is not None:
+            key_token_filters.append(
+                ModelFilter(tokenizer, kt_modules.filter, kt_modules.sched.model_filter_cand_thres)
             )
-            if config.model_filter_path is not None and kt_modules.filter is None:
-                kt_modules.filter = DivJudge(config.model_filter_path)
-                kt_modules.filter.to(input_ids.device)
-                if kt_modules.sched.model_filter_cand_thres is not None:
-                    key_token_filters.append(
-                        ModelFilter(tokenizer, kt_modules.filter, kt_modules.sched.model_filter_cand_thres)
-                    )
-            # in rl the model may be set to train mode in the training loop, so keep it in eval mode
-            if kt_modules.filter is not None:
-                kt_modules.filter.eval()
-            sequence_filters = create_sequence_filter(
-                tokenizer,
-                kt_n_gen,
-                config.rollout_filter_steps,
-                kt_modules.sched.rollout_filter_edit_dist_thres,
-                kt_modules.sched.model_filter_rollout_thres,
-                kt_modules.sched.cumulative_prob_filter_thres,
-                config.cumulative_prob_filter_interval,
-                kt_modules.filter,
-                config.token_filter_keep_math,
-            )
-        else:
-            print("kt_n_gen is 0; key token generation is disabled")
-            key_token_filters = sequence_filters = None
+    # in rl the model may be set to train mode in the training loop, so keep it in eval mode
+    if kt_modules.filter is not None:
+        kt_modules.filter.eval()
+    sequence_filters = create_sequence_filter(
+        tokenizer,
+        kt_n_gen,
+        config.rollout_filter_steps,
+        kt_modules.sched.rollout_filter_edit_dist_thres,
+        kt_modules.sched.model_filter_rollout_thres,
+        kt_modules.sched.cumulative_prob_filter_thres,
+        config.cumulative_prob_filter_interval,
+        kt_modules.filter,
+        config.token_filter_keep_math,
+    )
 
     return (
         config,
@@ -366,10 +365,16 @@ def generate(
     pad_id = cast(int, tokenizer.pad_token_id)
     assert kt_modules.sched is not None
     kt_n_gen = 0 if config.fallback else round(config.num_return_sequences * kt_modules.sched.mix_ratio)
+    if kt_n_gen == 0 and config.return_on_full:
+        return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, input_ids))
+
+    assert logits_proc is not None and attention_mask is not None
+
     orig_n_gen = config.num_return_sequences - kt_n_gen
     orig_n_samples = orig_n_gen * len(input_ids)
     input_len: int = int(input_ids.shape[1])
     bs_roots = input_ids.shape[0]
+    printed_complete = False
 
     # states to be updated in each step
     if kt_n_gen:
@@ -490,13 +495,30 @@ def generate(
         # stopping criteria
         stop_start = time.time()
         full_ids = maybe_cat_org_kt(orig_ids, kt_ids)
-        all_done = True
         should_stop = stopping_criteria(full_ids, logits_u)  # type: ignore
         bs_now = full_ids.shape[0]
+        assert bs_now == orig_n_samples + (kt_ids.shape[0] if kt_ids is not None else 0)
         mask = should_stop & (stop_lens[:bs_now] == 0)
         stop_lens[:bs_now][mask] = step + 1
-        if not stop_lens[:bs_now].all():
-            all_done = False
+
+        # check whether all kt seqs are full and already pass the point of branch removal
+        kt_stop_mask = stop_lens[orig_n_samples:bs_now] != 0
+        groups = branch_info.group_by_root()
+        # all completed are regarded as full
+        group_eff_lens = [kt_n_gen if kt_stop_mask[group].all() else len(group) for group in groups.values()]
+        thres = config.return_nb_thres_init - config.return_nb_thres_decay * step / config.max_new_tokens
+        all_kt_complete = sum(group_eff_lens) >= round(kt_n_gen * bs_roots * thres)
+
+        rank = dist.get_rank()
+        if all_kt_complete:
+            max_step = max(config.rollout_filter_steps)
+            for branch in branch_info:
+                if branch.birth_step + max_step >= step:
+                    all_kt_complete = False
+                    break
+            if all_kt_complete and not printed_complete:
+                print(f"rank {rank} prepare to stop due to all kt seqs are completed at step {step}")
+                printed_complete = True
 
         if isinstance(wrapped_range, tqdm) and kt_n_gen:
             all_suppressed = sum(b.suppressed_num for b in branch_info)
@@ -506,10 +528,24 @@ def generate(
 
         times["stop_criteria"] += time.time() - stop_start
 
-        if all_done and not config.sync_gpus:
+        if stop_lens[:bs_now].all() and not config.sync_gpus:
+            print("stopping due to stop criteria")
             break
+        # Synchronize KT early stop across ranks so vLLM phase starts together
+        if config.return_on_full:
+            global_all_kt_complete = all_kt_complete
+            if config.sync_gpus:
+                # Use MIN reduction on {0,1} flags: stop only when all ranks are ready
+                flag_tensor = torch.tensor(
+                    1 if all_kt_complete else 0, device=full_ids.device, dtype=torch.int32
+                )
+                dist.all_reduce(flag_tensor, op=dist.ReduceOp.MIN)
+                global_all_kt_complete = bool(flag_tensor.item() == 1)
+            if global_all_kt_complete:
+                print(f"rank {rank} stopping due to all kt seqs are full")
+                break
 
-    print(times)
+    print(str(times))
 
     # Step scheduler
     suppress_ratio = all_suppressed / (bs_roots * config.num_return_sequences * config.max_new_tokens)

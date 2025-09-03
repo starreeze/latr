@@ -30,6 +30,8 @@ python -m train.verl.run \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.name=kt \
     actor_rollout_ref.rollout.n=8 \
+    +actor_rollout_ref.rollout.kt_mixed_engine=True \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
     actor_rollout_ref.rollout.response_length=1024 \
     actor_rollout_ref.rollout.val_kwargs.n=8 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
@@ -63,5 +65,6 @@ python -m train.verl.run \
     kt.rollout_filter_edit_dist_thres=0.4 \
     kt.rollout_filter_steps="[20,30,50]" \
     kt.mix_ratio_schedule="{0:1,15:0.5,60:0}" \
+    kt.return_nb_thres_decay=0.05 \
     kt.model_arch=$MODEL_ARCH \
     2>&1 | tee $EXPERIMENT_NAME.log

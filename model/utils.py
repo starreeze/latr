@@ -58,6 +58,10 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     max_n_branch_per_token: int = 2
     # full: do sample only when branches are full; always: do sample whenever there is only one valid candidate
     sample_nk: Literal["none", "full", "always"] = "full"
+    # return the incomplete sequences when the branches are all full in generation
+    return_on_full: bool = True
+    return_nb_thres_init: float = 0.98  # higher than thres are considered full at initial step
+    return_nb_thres_decay: float = 0.0  # linear decay rate for the entire generation (0-1)
     fill_return_sequences: bool = True
     # fallback to original generation for debug purpose
     # fill: fill all the branches at start and use the kt logic; native: explicit multinomial sampling
