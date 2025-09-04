@@ -70,11 +70,7 @@ def _compute_response_info(batch: DataProto) -> dict[str, Any]:
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()  # (batch_size,)
 
-    return dict(
-        response_mask=response_mask,
-        prompt_length=prompt_length,
-        response_length=response_length,
-    )
+    return dict(response_mask=response_mask, prompt_length=prompt_length, response_length=response_length)
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str, Any]:
@@ -167,7 +163,9 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> dict[str,
         "prompt_length/mean": torch.mean(prompt_length).detach().item(),
         "prompt_length/max": torch.max(prompt_length).detach().item(),
         "prompt_length/min": torch.min(prompt_length).detach().item(),
-        "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
+        "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float())
+        .detach()
+        .item(),
     }
 
     # multi-turn conversation
@@ -336,7 +334,11 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
 
 
 def process_validation_metrics(
-    data_sources: list[str], sample_inputs: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
+    data_sources: list[str],
+    sample_inputs: list[str],
+    infos_dict: dict[str, list[Any]],
+    lens: list[int],
+    seed: int = 42,
 ) -> dict[str, dict[str, dict[str, float]]]:
     """
     Process validation metrics into a structured format with statistical analysis.
@@ -350,6 +352,7 @@ def process_validation_metrics(
         data_sources: List of data source identifiers for each sample.
         sample_inputs: List of input prompts corresponding to each sample.
         infos_dict: Dictionary mapping variable names to lists of values for each sample.
+        lens: List of lengths of output ids for each sample.
         seed: Random seed for bootstrap sampling. Defaults to 42.
 
     Returns:
@@ -365,18 +368,22 @@ def process_validation_metrics(
         Where metric_name includes:
         - "mean@N": Mean value across N samples
         - "std@N": Standard deviation across N samples
+        - "mean_len@N": Average token length of the responses in bootstrap samples of size N
         - "best@N/mean": Mean of the best values in bootstrap samples of size N
         - "best@N/std": Standard deviation of the best values in bootstrap samples
+        - "best@N/mean_len": Average token length of the responses in bootstrap samples of size N for the best values
         - "worst@N/mean": Mean of the worst values in bootstrap samples
         - "worst@N/std": Standard deviation of the worst values in bootstrap samples
+        - "worst@N/mean_len": Average token length of the responses in bootstrap samples of size N for the worst values
         - "maj@N/mean": Mean of majority voting results in bootstrap samples (if "pred" exists)
         - "maj@N/std": Standard deviation of majority voting results (if "pred" exists)
+        - "maj@N/mean_len": Average token length of the responses in bootstrap samples of size N for the majority voting results (if "pred" exists)
 
     Example:
         >>> data_sources = ["source1", "source1", "source2"]
         >>> sample_inputs = ["prompt1", "prompt1", "prompt2"]
         >>> infos_dict = {"score": [0.8, 0.9, 0.7], "pred": ["A", "A", "B"]}
-        >>> result = process_validation_metrics(data_sources, sample_inputs, infos_dict)
+        >>> result = process_validation_metrics(data_sources, sample_inputs, infos_dict, lens)
         >>> # result will contain statistics for each data source and variable
     """
     # Group metrics by data source, prompt and variable
@@ -386,6 +393,8 @@ def process_validation_metrics(
         var2vals = data_src2prompt2var2vals[data_source][prompt]
         for var_name, var_vals in infos_dict.items():
             var2vals[var_name].append(var_vals[sample_idx])
+        # also track response length as a dedicated variable
+        var2vals["len"].append(lens[sample_idx])
 
     # Calculate metrics for each group
     data_src2prompt2var2metric = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
@@ -417,7 +426,8 @@ def process_validation_metrics(
                         metric[f"worst@{n}/mean"], metric[f"worst@{n}/std"] = won_mean, won_std
                         if var2vals.get("pred", None) is not None:
                             vote_data = [
-                                {"val": val, "pred": pred} for val, pred in zip(var_vals, var2vals["pred"], strict=True)
+                                {"val": val, "pred": pred}
+                                for val, pred in zip(var_vals, var2vals["pred"], strict=True)
                             ]
                             [(maj_n_mean, maj_n_std)] = bootstrap_metric(
                                 data=vote_data,

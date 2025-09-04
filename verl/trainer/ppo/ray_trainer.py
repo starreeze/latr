@@ -36,6 +36,7 @@ from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from tools.utils import find_values
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -687,6 +688,7 @@ class RayPPOTrainer:
         sample_outputs = []
         sample_scores = []
         sample_turns = []
+        sample_lens = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -758,6 +760,9 @@ class RayPPOTrainer:
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
+            # collect response lengths for each generated sample
+            cur_lens = find_values(output_ids, self.tokenizer.eos_token_id).tolist()
+            sample_lens.extend(cur_lens)
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -804,7 +809,7 @@ class RayPPOTrainer:
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         data_src2var2metric2val = process_validation_metrics(
-            data_sources, sample_inputs, reward_extra_infos_dict
+            data_sources, sample_inputs, reward_extra_infos_dict, sample_lens
         )
         metric_dict = {}
         for data_source, var2metric2val in data_src2var2metric2val.items():
