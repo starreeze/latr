@@ -163,7 +163,10 @@ def normalize_final_answer(final_answer: str) -> str:
 
 
 def is_correct_minerva(
-    solution_str: str, gt: str, gt_need_extract: bool = False, answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)"
+    solution_str: str,
+    gt: str,
+    gt_need_extract: bool = False,
+    answer_pattern: str = r"(?i)Answer\s*:\s*([^\n]+)",
 ) -> tuple[bool, str]:
     """Check if the solution is correct according to Minerva criteria.
 
@@ -218,7 +221,10 @@ def is_correct_strict_box(
 
 
 def verify(
-    solution_str: str, answer: str, strict_box_verify: bool = False, pause_tokens_index: Optional[list[int]] = None
+    solution_str: str,
+    answer: str,
+    strict_box_verify: bool = False,
+    pause_tokens_index: Optional[list[int]] = None,
 ) -> bool:
     """Verify if the solution is correct.
 
@@ -265,8 +271,4 @@ def compute_score(
     reward = 1.0 if correct else -1.0
     acc = correct
 
-    return {
-        "score": reward,
-        "acc": acc,
-        "pred": pred,
-    }
+    return {"score": reward, "pred": pred}
