@@ -1,11 +1,11 @@
 import re
 from math import isclose
+from typing import Any
 
 import regex
 from func_timeout import func_timeout
+from latex2sympy2_extended import latex2sympy
 from sympy import N, simplify
-from sympy.parsing.latex import parse_latex
-from sympy.parsing.sympy_parser import parse_expr
 
 
 def convert_countdown_answer(answer: str) -> str:
@@ -48,20 +48,8 @@ def validate_countdown_equation(equation_str: str, available_numbers: list[int])
         return False
 
 
-def _parse_latex(s):
-    for f in [parse_latex, parse_expr]:
-        try:
-            return f(s.replace("\\\\", "\\"))
-        except Exception:
-            try:
-                return f(s)
-            except Exception:
-                pass
-    raise ValueError(f"Invalid latex: {s}")
-
-
 def simplify_math_expr(expr: str) -> str:
-    expr = _parse_latex(expr)
+    expr = latex2sympy(expr)  # type: ignore
     return str(simplify(expr))
 
 
@@ -385,32 +373,32 @@ def numeric_equal(prediction: float, reference: float):
 
 
 def symbolic_equal(a, b):
-    a = _parse_latex(a)
-    b = _parse_latex(b)
+    sa: Any = latex2sympy(a)
+    sb: Any = latex2sympy(b)
 
     # direct equal
     try:
-        if str(a) == str(b) or a == b:
+        if str(sa) == str(sb) or sa == sb:
             return True
     except Exception:
         pass
 
     # simplify equal
     try:
-        if a.equals(b) or simplify(a - b) == 0:
+        if sa.equals(sb) or simplify(sa - sb) == 0:
             return True
     except Exception:
         pass
 
     # equation equal
     try:
-        if (abs(a.lhs - a.rhs)).equals(abs(b.lhs - b.rhs)):
+        if (abs(sa.lhs - sa.rhs)).equals(abs(sb.lhs - sb.rhs)):
             return True
     except Exception:
         pass
 
     try:
-        if numeric_equal(float(N(a)), float(N(b))):
+        if numeric_equal(float(N(sa)), float(N(sb))):
             return True
     except Exception:
         pass
@@ -418,9 +406,9 @@ def symbolic_equal(a, b):
     # matrix
     try:
         # if a and b are matrix
-        if a.shape == b.shape:
-            _a = a.applyfunc(lambda x: round(x, 3))
-            _b = b.applyfunc(lambda x: round(x, 3))
+        if sa.shape == sb.shape:
+            _a = sa.applyfunc(lambda x: round(x, 3))
+            _b = sb.applyfunc(lambda x: round(x, 3))
             if _a.equals(_b):
                 return True
     except Exception:
@@ -436,8 +424,8 @@ def equal_level(a: str, b: str) -> int:
     if not a or not b:
         return 0
     try:
-        sa = _parse_latex(a)
-        sb = _parse_latex(b)
+        sa: Any = latex2sympy(a)
+        sb: Any = latex2sympy(b)
     except Exception:
         return 0
     if sa == sb:

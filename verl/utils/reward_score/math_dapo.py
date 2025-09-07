@@ -268,7 +268,7 @@ def compute_score(
     # Verify the solution
     correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index)
 
-    reward = 1.0 if correct else -1.0
+    reward = 1.0 if correct else 0.0
     acc = correct
 
-    return {"score": reward, "pred": pred}
+    return {"score": reward, "acc": acc, "pred": pred}

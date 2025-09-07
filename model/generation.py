@@ -397,7 +397,9 @@ def generate(
     times = defaultdict(float)
 
     # Generation loop (batched forward; per-root branching)
-    wrapped_range = range(config.max_new_tokens)
+    wrapped_range = range(
+        config.max_new_tokens if config.force_return_step == -1 else config.force_return_step
+    )
     if config.progress_bar:
         wrapped_range = tqdm(wrapped_range, desc="Generating")
     for step in wrapped_range:

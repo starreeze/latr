@@ -14,24 +14,18 @@
 # Adapted from https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/tasks/hendrycks_math/utils.py
 
 
-# !!!!!!!!!!!!!!!!!!!!! modify to align with dapo_math
 def compute_score(solution_str, ground_truth) -> float:
-    correct = 0
-    pred = "[INVALID]"
+    retval = 0.0
     try:
         string_in_last_boxed = last_boxed_only_string(solution_str)
         if string_in_last_boxed is not None:
             answer = remove_boxed(string_in_last_boxed)
-            pred = answer
             if is_equiv(answer, ground_truth):
-                correct = 1
+                retval = 1.0
     except Exception as e:
         print(e)
 
-    return {"score": correct, "pred": pred}
-
-
-# !!!!!!!!!!!!!!!!!!!!! end modify
+    return retval
 
 
 # string normalization from https://github.com/EleutherAI/lm-evaluation-harness/blob/master/lm_eval/tasks/hendrycks_math.py

@@ -4,7 +4,6 @@ from typing import cast
 
 import torch
 import torch.distributed as dist
-import yaml
 from tensordict import TensorDict
 from torch import nn
 from torch.amp.autocast_mode import autocast
@@ -21,8 +20,6 @@ from verl.utils.model import convert_weight_keys
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 
-kt_conf_path = "/dev/shm/kt/config.yaml"
-
 
 def _pre_process_inputs(pad_token_id, prompt_token_ids: torch.Tensor) -> list[int]:
     non_pad_index = torch.nonzero(prompt_token_ids != pad_token_id, as_tuple=False)[0][0]
@@ -38,8 +35,7 @@ class KTRollout(BaseRollout):
         self.config = config
         self.module = module
 
-        conf_dict = yaml.safe_load(open(kt_conf_path))
-        self.kt_config = init_dataclass_from_dict(KeyTokenGenConfig, conf_dict)
+        self.kt_config = init_dataclass_from_dict(KeyTokenGenConfig, dict(config.kt))
         self.kt_config.sync_gpus = True
         # self.kt_config.progress_bar = False
         self.tokenizer = AutoTokenizer.from_pretrained(path)
@@ -155,9 +151,6 @@ class KTRollout(BaseRollout):
 
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).repeat(generated_batch_size, 1)
-
-        if is_validate:
-            breakpoint()
 
         response_position_ids = position_ids[:, -1:] + delta_position_id
         output_position_ids = torch.cat([position_ids, response_position_ids], dim=-1)

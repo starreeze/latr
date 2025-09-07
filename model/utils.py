@@ -62,6 +62,7 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     return_on_full: bool = True
     return_nb_thres_init: float = 0.98  # higher than thres are considered full at initial step
     return_nb_thres_decay: float = 0.0  # linear decay rate for the entire generation (0-1)
+    force_return_step: int = -1  # do at most n steps before returning
     fill_return_sequences: bool = True
     # fallback to original generation for debug purpose
     # fill: fill all the branches at start and use the kt logic; native: explicit multinomial sampling

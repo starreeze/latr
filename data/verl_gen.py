@@ -50,7 +50,7 @@ class SampleProcessor:
         return data
 
     def process_math_dapo(self, sample, idx):
-        prompt = make_prompt_math_w_inst(sample, self.template)
+        prompt = make_prompt_math_raw(sample, self.template, "prompt")
         data = {
             "data_source": self.dataset,
             "prompt": prompt,
@@ -85,7 +85,18 @@ class SampleProcessor:
     def process_math500(self, sample, idx):
         prompt = make_prompt_math_raw(sample, self.template, "problem")
         data = {
-            "data_source": "HuggingFaceH4/MATH-500",
+            "data_source": "math500",
+            "prompt": prompt,
+            "ability": "MATH",
+            "reward_model": {"ground_truth": str(sample["answer"]), "style": "rule-lighteval/MATH_v2"},
+            "extra_info": {"split": self.split, "index": idx},
+        }
+        return data
+
+    def process_amc23(self, sample, idx):
+        prompt = make_prompt_math_raw(sample, self.template, "question")
+        data = {
+            "data_source": "amc23",
             "prompt": prompt,
             "ability": "MATH",
             "reward_model": {"ground_truth": str(sample["answer"]), "style": "rule-lighteval/MATH_v2"},
@@ -103,7 +114,7 @@ def load_raw(name: str, src: str):
         dataset = Dataset.from_parquet(os.path.join(src, "2024.parquet"))
     elif name == "aime2025":
         dataset = Dataset.from_json(os.path.join(src, "2025.jsonl"))
-    elif name == "math500":
+    elif name in ["math500", "amc23"]:
         dataset = load_dataset(src, split="test")
     else:
         raise ValueError(f"Invalid dataset name: {name}")

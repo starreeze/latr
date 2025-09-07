@@ -3,7 +3,7 @@ BASE_MODEL=/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/
 N_GPUS=8
 EXPERIMENT_NAME=grpo-vllm-base
 
-python -m train.verl.run \
+python -m verl.trainer.main_ppo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
     data.train_batch_size=256 \
