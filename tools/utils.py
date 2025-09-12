@@ -391,6 +391,11 @@ def camel_to_snake(name: str, split="_") -> str:
     return re.sub("([a-z0-9])([A-Z])", rf"\1{split}\2", s1).lower()
 
 
+def snake_to_camel(name: str, split="_") -> str:
+    """Convert snake_case to CamelCase."""
+    return "".join(word.capitalize() for word in name.split(split))
+
+
 def verify_generation(input_ids: torch.Tensor, output_ids: torch.Tensor, tokenizer: PreTrainedTokenizer):
     bs, input_len = input_ids.shape
     equals = torch.all(input_ids == output_ids[:, :input_len], dim=1)

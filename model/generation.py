@@ -162,7 +162,8 @@ def _init_generation_config(
 
 def _sample_new_sequence_with_rollout(
     key_token_filters: KeyTokenFilterList,
-    probs: torch.Tensor,  # (batch, vocab)
+    probs_raw: torch.Tensor,  # (batch, vocab)
+    probs_processed: torch.Tensor,  # (batch, vocab)
     current_ids: torch.Tensor,  # (batch, seq_len)
     attention_mask: torch.Tensor,  # (batch, seq_len)
     cache: MixedCache,
@@ -187,7 +188,7 @@ def _sample_new_sequence_with_rollout(
     batch_size = current_ids.shape[0]
 
     # 1) Compute top-k for all rows
-    topk_probs, topk_ids = probs.topk(max_n_branch_per_token, dim=-1)  # (bs, max_n_branch)
+    topk_probs, topk_ids = probs_raw.topk(max_n_branch_per_token, dim=-1)  # (bs, max_n_branch)
 
     sample_mask_start = time.time()
     times["kt_sample/topk"] = sample_mask_start - topk_start
@@ -245,7 +246,7 @@ def _sample_new_sequence_with_rollout(
     times["kt_sample/capacity_assign"] = new_token_branch_start - capacity_assign_start
 
     # 5) Build new tokens and genealogy
-    logps = (probs + 1e-9).log()
+    logps = (probs_raw + 1e-9).log()
     new_tokens_on_original_branch: list[int] = []
     new_branch_seqs: list[torch.Tensor] = []
     new_branch_attn: list[torch.Tensor] = []
@@ -265,8 +266,8 @@ def _sample_new_sequence_with_rollout(
             sample_nk == "always"
             or (sample_nk == "full" and branch_info.get_num_branch(row) == num_return_sequences)
         ):
-            # here prob is already processed by logits_proc
-            new_token = int(torch.multinomial(probs[row], num_samples=1).item())
+            # here we use the processed probabilities for fallback sampling
+            new_token = int(torch.multinomial(probs_processed[row], num_samples=1).item())
             new_tokens_on_original_branch.append(new_token)
             branch_info[row].accumulated_logp += logps[row, new_token].item()
             continue
@@ -418,8 +419,8 @@ def generate(
             logits_to_keep=1,
         )
 
-        prob_start = time.time()
-        times["forward"] += prob_start - forward_start
+        sample_start = time.time()
+        times["forward"] += sample_start - forward_start
 
         assert outputs.past_key_values is not None
         cache = MixedCache(orig_n_samples, outputs.past_key_values)
@@ -428,19 +429,17 @@ def generate(
         assert logits is not None and logits.shape[1] == 1
         logits = logits[:, 0]  # (bs, vocab)
 
-        logits_u = logits_proc(cast(torch.LongTensor, full_ids), cast(torch.FloatTensor, logits))
-        probs = torch.softmax(logits_u, dim=-1)
-
-        sample_start = time.time()
-        times["prob"] += sample_start - prob_start
-
         if orig_ids is not None:
+            orig_logits = logits_proc(
+                cast(torch.LongTensor, orig_ids), cast(torch.FloatTensor, logits[:orig_n_samples])
+            )
+            orig_probs = torch.softmax(orig_logits, dim=-1)
             assert orig_mask is not None
-            orig_probs = probs[:orig_n_samples]
             new_tokens = torch.multinomial(orig_probs, num_samples=1)
             orig_ids = torch.cat([orig_ids, new_tokens], dim=1)
             new_attn_mask = torch.ones((orig_ids.shape[0], 1), device=orig_ids.device, dtype=orig_mask.dtype)
             orig_mask = torch.cat([orig_mask, new_attn_mask], dim=1)
+            del orig_logits, orig_probs
 
             orig_end = time.time()
             times["orig_sample"] += orig_end - sample_start
@@ -449,11 +448,17 @@ def generate(
         if kt_n_gen:
             assert kt_ids is not None and kt_mask is not None
             assert key_token_filters is not None
-            kt_probs = probs[orig_n_samples:]
+            kt_probs_raw = torch.softmax(logits[orig_n_samples:], dim=-1)
+            kt_logits = logits_proc(
+                cast(torch.LongTensor, kt_ids), cast(torch.FloatTensor, logits[orig_n_samples:])
+            )
+            kt_probs_processed = torch.softmax(kt_logits, dim=-1)
+            del kt_logits
             complete_mask = stop_lens[orig_n_samples : orig_n_samples + kt_ids.shape[0]] != 0
             kt_ids, kt_mask, cache, kt_times = _sample_new_sequence_with_rollout(
                 key_token_filters,
-                kt_probs,
+                kt_probs_raw,
+                kt_probs_processed,
                 kt_ids,
                 kt_mask,
                 cache,
@@ -496,7 +501,7 @@ def generate(
         # stopping criteria
         stop_start = time.time()
         full_ids = maybe_cat_org_kt(orig_ids, kt_ids)
-        should_stop = stopping_criteria(full_ids, logits_u)  # type: ignore
+        should_stop = stopping_criteria(full_ids, logits)  # type: ignore
         bs_now = full_ids.shape[0]
         assert bs_now == orig_n_samples + (kt_ids.shape[0] if kt_ids is not None else 0)
         mask = should_stop & (stop_lens[:bs_now] == 0)
@@ -589,6 +594,11 @@ def generate(
             all_root_seqs.append(orig_ids[root * orig_n_gen : (root + 1) * orig_n_gen])
         all_seqs.extend(all_root_seqs)
     sequences = torch.cat(all_seqs, dim=0)
+
+    mask = sequences >= len(tokenizer)
+    if mask.any():
+        print(f"Warning: rank {rank} sequences has {mask.sum()} invalid tokens")
+        sequences[mask] = pad_id
 
     return GenerateKeyTokenOutput(
         sequences=cast(torch.LongTensor, sequences),

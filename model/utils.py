@@ -14,7 +14,7 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 @dataclass
 class GenConfig:
     max_new_tokens: int = 4096
-    temperature: float = 0.2
+    temperature: float = 1
     top_k: int | None = None
     top_p: float = 1
     do_sample: bool = True
@@ -57,7 +57,7 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     output_hidden_states: bool = False
     max_n_branch_per_token: int = 2
     # full: do sample only when branches are full; always: do sample whenever there is only one valid candidate
-    sample_nk: Literal["none", "full", "always"] = "full"
+    sample_nk: Literal["none", "full", "always"] = "none"
     # return the incomplete sequences when the branches are all full in generation
     return_on_full: bool = True
     return_nb_thres_init: float = 0.98  # higher than thres are considered full at initial step

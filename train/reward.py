@@ -3,21 +3,9 @@ import re
 import torch
 
 from verl import DataProto
-from verl.utils.reward_score import gsm8k, math
 from verl.workers.reward_manager.registry import register
 
 # the following is modified from https://github.com/JerryWu-code/TinyZero/blob/main/verl/trainer/main_ppo.py
-
-
-def _select_rm_score_fn(data_source):
-    if data_source == "openai/gsm8k":
-        return gsm8k.compute_score
-    elif data_source == "lighteval/MATH":
-        return math.compute_score
-    elif "countdown" in data_source:
-        return compute_score
-    else:
-        raise NotImplementedError
 
 
 @register("countdown_math")
@@ -36,6 +24,7 @@ class CountdownMathRewardManager:
             return data.batch["rm_scores"]
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        acc = []
 
         already_print_data_sources = {}
 
@@ -61,9 +50,9 @@ class CountdownMathRewardManager:
 
             # select rm_score
             data_source = data_item.non_tensor_batch["data_source"]
-            compute_score_fn = _select_rm_score_fn(data_source)
-
-            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth)
+            assert "countdown" in data_source
+            score = compute_score(solution_str=sequences_str, ground_truth=ground_truth)
+            acc.append(score == 1.0)
             reward_tensor[i, valid_response_length - 1] = score
 
             if data_source not in already_print_data_sources:
@@ -73,7 +62,11 @@ class CountdownMathRewardManager:
                 already_print_data_sources[data_source] += 1
                 print(sequences_str)
 
-        return reward_tensor if not return_dict else {"reward_tensor": reward_tensor}
+        return (
+            reward_tensor
+            if not return_dict
+            else {"reward_tensor": reward_tensor, "reward_extra_info": {"acc": acc}}
+        )
 
 
 # the following is copied from https://github.com/Jiayi-Pan/TinyZero/blob/main/verl/utils/reward_score/countdown.py
