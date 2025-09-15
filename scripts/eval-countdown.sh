@@ -1,7 +1,7 @@
 DATA_DIR=dataset/countdown-base
 BASE_MODEL=/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B
 N_GPUS=8
-EXPERIMENT_NAME=dapo-kt-base
+EXPERIMENT_NAME=$1
 
 python -m verl.trainer.main_ppo \
     data.train_files=$DATA_DIR/train.parquet \
@@ -51,4 +51,4 @@ python -m verl.trainer.main_ppo \
     trainer.test_freq=-1 \
     trainer.project_name=SampleRL \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    2>&1 | tee $EXPERIMENT_NAME.log
+    2>&1 | tee outputs/results/${EXPERIMENT_NAME}.log
