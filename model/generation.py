@@ -68,8 +68,6 @@ class KeyTokenGenMixin:
 def _init_generation_config(
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor | None,
     config: KeyTokenGenConfig | None,
     stopping_criteria: StoppingCriteriaList | None,
     kt_modules: KtModules,
@@ -84,32 +82,6 @@ def _init_generation_config(
         kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, config.__dict__)
     kt_n_gen = round(config.num_return_sequences * kt_modules.sched.mix_ratio)
 
-    # for key token generation
-    if config.fallback or kt_n_gen == 0:
-        print("fallback is True or kt_n_gen is 0; key token generation is disabled")
-        return config, input_ids, attention_mask, None, None, None, None
-
-    eos_id = cast(int, tokenizer.eos_token_id)
-    pad_id = cast(int, tokenizer.pad_token_id)
-
-    if attention_mask is None:
-        attention_mask = input_ids != pad_id
-
-    assert input_ids.ndim == 2, f"input_ids must be 1D or 2D, got {input_ids.ndim}D"
-    interval = get_repeat_interleave(input_ids)
-
-    if interval == 1:
-        assert config.num_return_sequences > 1, "cannot perform kt generation on non-grouped inputs"
-    elif config.num_return_sequences == 1:
-        config.num_return_sequences = interval
-    else:
-        assert interval == config.num_return_sequences, "interval and n_seq do not match"
-
-    input_ids = input_ids[::interval]
-    attention_mask = attention_mask[::interval]
-
-    # init constants
-    # for common generation
     if stopping_criteria is None:
         eos_id = cast(int, tokenizer.eos_token_id)
         stopping_criteria = StoppingCriteriaList([EosTokenCriteria(eos_token_id=eos_id)])
@@ -118,6 +90,10 @@ def _init_generation_config(
         logits_proc.append(TopKLogitsWarper(top_k=config.top_k))
     if config.top_p is not None and config.top_p < 1:
         logits_proc.append(TopPLogitsWarper(top_p=config.top_p))
+
+    if config.fallback or kt_n_gen == 0:
+        print("fallback is True or kt_n_gen is 0; key token generation is disabled")
+        return config, None, None, stopping_criteria, logits_proc
 
     key_token_filters = create_key_token_filter(
         tokenizer=tokenizer,
@@ -129,7 +105,7 @@ def _init_generation_config(
     )
     if config.model_filter_path is not None and kt_modules.filter is None:
         kt_modules.filter = DivJudge(config.model_filter_path)
-        kt_modules.filter.to(input_ids.device)
+        kt_modules.filter.to(model.device)
         if kt_modules.sched.model_filter_cand_thres is not None:
             key_token_filters.append(
                 ModelFilter(tokenizer, kt_modules.filter, kt_modules.sched.model_filter_cand_thres)
@@ -149,15 +125,7 @@ def _init_generation_config(
         config.token_filter_keep_math,
     )
 
-    return (
-        config,
-        input_ids,
-        attention_mask,
-        sequence_filters,
-        key_token_filters,
-        stopping_criteria,
-        logits_proc,
-    )
+    return (config, sequence_filters, key_token_filters, stopping_criteria, logits_proc)
 
 
 def _sample_new_sequence_with_rollout(
@@ -354,12 +322,22 @@ def generate(
     The key token tree search is a tree search algorithm that generates a tree from the given input sequence (root sequence).
     Every time a new token is generated, the tree is split into multiple branches if this is a key token and has multiple valid candidates.
     If the number of branches exceeds num_return_sequences, the branches with lower probability are suppressed.
+
+    Args:
+        model: the model to generate. Support any autoregressive HF model.
+        kt_modules: includes a divergence judger (deprecated) and a parameter scheduler. Pass KtModules() if use defaults.
+        input_ids: the input ids to generate from.
+        tokenizer: the tokenizer to use.
+        attention_mask: the attention mask to use.
+        stopping_criteria: the stopping criteria to use.
+        config: the configuration to use.
+        **kwargs: additional arguments that overrides the config.
+
+    Returns:
+        The generated output.
     """
-    # init config & constants
-    config, input_ids, attention_mask, sequence_filters, key_token_filters, stopping_criteria, logits_proc = (
-        _init_generation_config(
-            model, tokenizer, input_ids, attention_mask, config, stopping_criteria, kt_modules, kwargs
-        )
+    config, sequence_filters, key_token_filters, stopping_criteria, logits_proc = _init_generation_config(
+        model, tokenizer, config, stopping_criteria, kt_modules, kwargs
     )
     eos_id = cast(int, tokenizer.eos_token_id)
     pad_id = cast(int, tokenizer.pad_token_id)
@@ -368,13 +346,26 @@ def generate(
     if kt_n_gen == 0 and config.return_on_full:
         return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, input_ids))
 
-    assert logits_proc is not None and attention_mask is not None
+    # squeeze sequences to prepare tree search roots
+    assert logits_proc is not None
+    assert input_ids.ndim == 2, f"input_ids must be 1D or 2D, got {input_ids.ndim}D"
+    if attention_mask is None:
+        attention_mask = input_ids != pad_id
+    interval = get_repeat_interleave(input_ids)
+    if interval == 1:
+        assert config.num_return_sequences > 1, "cannot perform kt generation on non-grouped inputs"
+    elif config.num_return_sequences == 1:
+        config.num_return_sequences = interval
+    else:
+        assert interval == config.num_return_sequences, "interval and n_seq do not match"
+    input_ids = input_ids[::interval]
+    attention_mask = attention_mask[::interval]
 
+    # constants
     orig_n_gen = config.num_return_sequences - kt_n_gen
     orig_n_samples = orig_n_gen * len(input_ids)
     input_len: int = int(input_ids.shape[1])
     bs_roots = input_ids.shape[0]
-    printed_complete = False
 
     # states to be updated in each step
     if kt_n_gen:
@@ -393,9 +384,10 @@ def generate(
     # Allocate stop_lens up to max total capacity
     max_total = bs_roots * config.num_return_sequences
     stop_lens = torch.zeros(max_total, device=input_ids.device, dtype=input_ids.dtype)
-    branch_info = BranchInfo(n_roots=bs_roots)
+    branch_info = BranchInfo(n_roots=bs_roots) if kt_n_gen else None
     all_suppressed = 0
     times = defaultdict(float)
+    printed_complete = False
 
     # Generation loop (batched forward; per-root branching)
     wrapped_range = range(
@@ -446,7 +438,7 @@ def generate(
             sample_start = orig_end
 
         if kt_n_gen:
-            assert kt_ids is not None and kt_mask is not None
+            assert kt_ids is not None and kt_mask is not None and branch_info is not None
             assert key_token_filters is not None
             kt_probs_raw = torch.softmax(logits[orig_n_samples:], dim=-1)
             kt_logits = logits_proc(
@@ -507,6 +499,15 @@ def generate(
         mask = should_stop & (stop_lens[:bs_now] == 0)
         stop_lens[:bs_now][mask] = step + 1
 
+        if stop_lens[:bs_now].all() and not config.sync_gpus:
+            print("stopping due to stop criteria")
+            break
+
+        if not kt_n_gen:
+            continue
+
+        assert branch_info is not None
+
         # check whether all kt seqs are full and already pass the point of branch removal
         kt_stop_mask = stop_lens[orig_n_samples:bs_now] != 0
         groups = branch_info.group_by_root()
@@ -527,6 +528,7 @@ def generate(
                 printed_complete = True
 
         if isinstance(wrapped_range, tqdm) and kt_n_gen:
+            assert branch_info is not None
             all_suppressed = sum(b.suppressed_num for b in branch_info)
             wrapped_range.set_postfix(
                 suppressed=all_suppressed, branches=branch_info.get_root_branches_repr()
@@ -534,9 +536,6 @@ def generate(
 
         times["stop_criteria"] += time.time() - stop_start
 
-        if stop_lens[:bs_now].all() and not config.sync_gpus:
-            print("stopping due to stop criteria")
-            break
         # Synchronize KT early stop across ranks so vLLM phase starts together
         if config.return_on_full:
             global_all_kt_complete = all_kt_complete
@@ -553,10 +552,6 @@ def generate(
 
     print(str(times))
 
-    # Step scheduler
-    suppress_ratio = all_suppressed / (bs_roots * config.num_return_sequences * config.max_new_tokens)
-    empty_branch_ratio = 1 - len(branch_info) / (bs_roots * config.num_return_sequences)
-
     if orig_ids is not None:
         seq_len = orig_ids.shape[1]
         batch_stop_lens = stop_lens[:orig_n_samples]
@@ -565,11 +560,15 @@ def generate(
         should_pad = position_indices >= actual_seq_lens.unsqueeze(1)
         orig_ids[should_pad] = pad_id
 
-    if kt_n_gen == 0:
+    if not kt_n_gen:
         return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, orig_ids))
 
+    # calculate stats for step scheduler
+    assert kt_ids is not None and branch_info is not None
+    suppress_ratio = all_suppressed / (bs_roots * config.num_return_sequences * config.max_new_tokens)
+    empty_branch_ratio = 1 - len(branch_info) / (bs_roots * config.num_return_sequences)
+
     # pad for kt_ids
-    assert kt_ids is not None
     seq_len = kt_ids.shape[1]
     batch_stop_lens = stop_lens[orig_n_samples : orig_n_samples + kt_ids.shape[0]]
     actual_seq_lens = torch.where(batch_stop_lens > 0, input_len + batch_stop_lens, seq_len)
@@ -597,6 +596,7 @@ def generate(
 
     mask = sequences >= len(tokenizer)
     if mask.any():
+        # this can happen when the available embedding capacity is larger than the vocab size
         print(f"Warning: rank {rank} sequences has {mask.sum()} invalid tokens")
         sequences[mask] = pad_id
 

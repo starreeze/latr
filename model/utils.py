@@ -28,10 +28,10 @@ class GenConfig:
 @dataclass
 class BranchDynamicParam:
     # dynamic filter params
-    prob_filter_abs_thres: float | None = 0.2
-    prob_filter_rel_thres: float | None = 0.2
+    prob_filter_abs_thres: float | None = 0.25
+    prob_filter_rel_thres: float | None = 0.15
     similarity_filter_thres: float | None = None
-    rollout_filter_edit_dist_thres: float | None = None
+    rollout_filter_edit_dist_thres: float | None = 0.4
     model_filter_cand_thres: float | None = None  # the higher the more loose
     model_filter_rollout_thres: float | None = None  # the higher the more loose
     cumulative_prob_filter_thres: float | None = None  # the higher the more loose
@@ -72,7 +72,7 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     # filters
     stop_word_filter: bool = False
     model_filter_path: str | None = None
-    rollout_filter_steps: list[int] = field(default_factory=lambda: [30, 50])
+    rollout_filter_steps: list[int] = field(default_factory=lambda: [20, 30, 50])
     cumulative_prob_filter_interval: int = 10
     token_filter_keep_math: bool = True
 
