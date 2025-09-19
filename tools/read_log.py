@@ -7,7 +7,7 @@ def read_file(path: str) -> dict:
         lines = f.readlines()[-1000:]
     metrics = {}
     for line in lines:
-        if not "wandb:" in line:
+        if "wandb:" not in line:
             continue
         try:
             k, v = line.split()[-2:]
@@ -25,9 +25,11 @@ def read_file(path: str) -> dict:
         else:
             continue
         try:
-            metrics[f"{dataset}-{metric}"] = float(v)
+            value = float(v) * (100 if metric.startswith("Acc") else 1)
+            metrics[f"{dataset}-{metric}"] = value
         except Exception:
             continue
+
     return metrics
 
 

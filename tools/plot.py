@@ -1,29 +1,69 @@
+from argparse import ArgumentParser
+
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import pandas as pd
 
+
+def auto_convert_numeric(df):
+    df = df.copy()  # Avoid modifying original
+    for col in df.columns:
+        # Try to convert to numeric, errors='ignore' leaves non-numeric as object
+        numeric_series = pd.to_numeric(df[col], errors="ignore")  # type: ignore
+
+        # If conversion succeeded (i.e., not object dtype anymore), proceed
+        if not pd.api.types.is_object_dtype(numeric_series):
+            # Check if all non-NaN values are whole numbers → try int
+            if numeric_series.dropna().apply(lambda x: isinstance(x, int) or x.is_integer()).all():
+                try:
+                    # Try converting to nullable integer (supports NaN)
+                    df[col] = numeric_series.astype("Int64")
+                except Exception:
+                    # Fallback to original numeric (likely float due to NaN)
+                    df[col] = numeric_series
+            else:
+                # Keep as float (default from pd.to_numeric)
+                df[col] = numeric_series
+        # else: leave as original (non-numeric, object dtype)
+    return df
+
+
+parser = ArgumentParser()
+parser.add_argument("--path", required=True)
+parser.add_argument("--interval", type=int, default=0)
+parser.add_argument("--min_y", type=float, default=0)
+parser.add_argument("--max_y", type=float, default=0)
+parser.add_argument("--y_tick", type=float, nargs="+", default=[])
+parser.add_argument("--x_tick", type=float, nargs="+", default=[])
+parser.add_argument("--set_label", default="true")
+parser.add_argument("--legend", default="lower_right")
+args = parser.parse_args()
+
 mpl.rcParams.update({"font.size": 20})
-interval = 40
 
 # Load data
-df = pd.read_csv("dataset/math.csv")
+df = pd.read_csv(args.path)
 
 # Strip whitespace from column names and values
 df.columns = df.columns.str.strip()
-df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-df = df.astype(float)  # Ensure numeric types
-df = df[df["Step"] % interval == 0]
+main_key = df.columns[0]
+df = auto_convert_numeric(df)
+
+if args.interval > 0:
+    mask = df[main_key] % args.interval == 0
+    # mask.iloc[-1] = True
+    df = df[mask]
 
 # --- PLOTTING ---
 fig, ax = plt.subplots(figsize=(8, 6))
 
-colors = ["#ed7d31", "#5b9ad5", "#ed7d31", "#5b9ad5"]
+colors = ["#8cc5e3", "#c46666", "#2066a8", "#a00000"]
 markers = ["o", "o", "s", "s"]
 
 # Plot each line with markers
-for i, col in enumerate(df.columns[1:]):  # Skip 'Step' column
+for i, col in enumerate(df.columns[1:]):  # Skip main column
     ax.plot(
-        df["Step"],
+        df[main_key],
         df[col],
         label=col,
         color=colors[i],
@@ -36,15 +76,23 @@ for i, col in enumerate(df.columns[1:]):  # Skip 'Step' column
 
 # --- STYLING ---
 # ax.set_title("Algorithm Performance Comparison", fontsize=16, fontweight="bold", pad=20)
-ax.set_xlabel("Step")
-ax.set_ylabel("Average Validation Reward")
+if args.set_label == "true":
+    ax.set_xlabel(main_key)
+    ax.set_ylabel("Average Validation Reward")
+
+min_y = args.min_y if args.min_y else None
+max_y = args.max_y if args.max_y else None
+ax.set_ylim([min_y, max_y])
+
+if args.y_tick:
+    ax.set_yticks(args.y_tick)
 
 # Grid and background
 ax.grid(True, which="major", linestyle="--", linewidth=0.5, alpha=0.7)
 ax.set_facecolor("#FAFAFA")
 
 # Legend
-ax.legend(loc="lower right", frameon=True, fancybox=True, shadow=True)
+ax.legend(loc=args.legend.replace("_", " "), frameon=True, fancybox=True, shadow=True)
 
 # Spine styling
 for spine in ax.spines.values():
