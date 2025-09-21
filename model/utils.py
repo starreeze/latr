@@ -146,10 +146,11 @@ class BranchParamScheduler(BranchDynamicParam):
 @dataclass
 class GenerateKeyTokenOutput(GenerateDecoderOnlyOutput):
     num_suppressed_branches: int | None = None
-    scheduler: BranchParamScheduler | None = None
     suppress_ratio: float | None = None
     empty_branch_ratio: float | None = None
     num_seq: int | None = None
+    branching_ratio: float | None = None
+    avg_saturate_len: float | None = None
 
 
 class MixedCache:

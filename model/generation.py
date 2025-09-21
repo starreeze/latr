@@ -144,7 +144,7 @@ def _sample_new_sequence_with_rollout(
     input_len: int,
     eos_id: int,
     sync_gpus: bool,
-) -> tuple[torch.Tensor, torch.Tensor, MixedCache, dict[str, float]]:
+) -> tuple[torch.Tensor, torch.Tensor, MixedCache, dict[str, float], int]:
     """
     Unified batched sampling and branching across all roots.
     Maintains a single current_ids tensor and a single BranchInfo with multiple roots.
@@ -170,12 +170,13 @@ def _sample_new_sequence_with_rollout(
         current_ids = torch.cat([current_ids, pad_tensor], dim=1)
         ones_col = torch.ones((batch_size, 1), device=device, dtype=attention_mask.dtype)
         attention_mask = torch.cat([attention_mask, ones_col], dim=1)
-        return current_ids, attention_mask, cache, times
+        return current_ids, attention_mask, cache, times, 0
 
     global_valid_ids = current_ids[valid_rows, input_len:]
     global_valid_topk_ids = topk_ids[valid_rows]
     global_valid_topk_probs = topk_probs[valid_rows]
     global_valid_masks = key_token_filters(global_valid_ids, global_valid_topk_ids, global_valid_topk_probs)
+    branching_token_count = global_valid_masks[:, 1:].sum()
 
     # 3) Build tri-state sample mask for all rows (0=keep, 1=invalid, 2=suppress)
     sample_masks = torch.ones_like(topk_ids, dtype=torch.int8)
@@ -293,7 +294,7 @@ def _sample_new_sequence_with_rollout(
     times["kt_sample/cat_cache"] = time.time() - cat_cache_start
 
     assert len(current_ids) == len(attention_mask) == (sample_masks == 0).sum()
-    return current_ids, attention_mask, cache, times
+    return current_ids, attention_mask, cache, times, int(branching_token_count.item())
 
 
 def maybe_cat_org_kt(orig: torch.Tensor | None, kt: torch.Tensor | None, dim=0) -> torch.Tensor:
@@ -386,6 +387,7 @@ def generate(
     stop_lens = torch.zeros(max_total, device=input_ids.device, dtype=input_ids.dtype)
     branch_info = BranchInfo(n_roots=bs_roots) if kt_n_gen else None
     all_suppressed = 0
+    all_branching_token_count = 0
     times = defaultdict(float)
     printed_complete = False
 
@@ -447,7 +449,7 @@ def generate(
             kt_probs_processed = torch.softmax(kt_logits, dim=-1)
             del kt_logits
             complete_mask = stop_lens[orig_n_samples : orig_n_samples + kt_ids.shape[0]] != 0
-            kt_ids, kt_mask, cache, kt_times = _sample_new_sequence_with_rollout(
+            kt_ids, kt_mask, cache, kt_times, branching_token_count = _sample_new_sequence_with_rollout(
                 key_token_filters,
                 kt_probs_raw,
                 kt_probs_processed,
@@ -466,6 +468,7 @@ def generate(
             )
             for k, v in kt_times.items():
                 times[k] += v
+            all_branching_token_count += branching_token_count
 
             filter_start = time.time()
             times["kt_sample"] += filter_start - sample_start
@@ -563,12 +566,8 @@ def generate(
     if not kt_n_gen:
         return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, orig_ids))
 
-    # calculate stats for step scheduler
-    assert kt_ids is not None and branch_info is not None
-    suppress_ratio = all_suppressed / (bs_roots * config.num_return_sequences * config.max_new_tokens)
-    empty_branch_ratio = 1 - len(branch_info) / (bs_roots * config.num_return_sequences)
-
     # pad for kt_ids
+    assert kt_ids is not None and branch_info is not None
     seq_len = kt_ids.shape[1]
     batch_stop_lens = stop_lens[orig_n_samples : orig_n_samples + kt_ids.shape[0]]
     actual_seq_lens = torch.where(batch_stop_lens > 0, input_len + batch_stop_lens, seq_len)
@@ -600,11 +599,17 @@ def generate(
         print(f"Warning: rank {rank} sequences has {mask.sum()} invalid tokens")
         sequences[mask] = pad_id
 
+    # calculate stats
+    suppress_ratio = all_suppressed / (bs_roots * config.num_return_sequences * config.max_new_tokens)
+    empty_branch_ratio = 1 - len(branch_info) / (bs_roots * config.num_return_sequences)
+    total_saturate_len = sum(max(branch_info[b].birth_step for b in g) for g in groups.values())
+
     return GenerateKeyTokenOutput(
         sequences=cast(torch.LongTensor, sequences),
         num_suppressed_branches=all_suppressed,
-        scheduler=kt_modules.sched,
         suppress_ratio=suppress_ratio,
         empty_branch_ratio=empty_branch_ratio,
         num_seq=len(branch_info),
+        branching_ratio=all_branching_token_count / int(stop_lens.sum().item()),
+        avg_saturate_len=total_saturate_len / len(groups),
     )
