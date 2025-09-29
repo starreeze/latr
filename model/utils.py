@@ -20,7 +20,6 @@ class GenConfig:
     do_sample: bool = True
     use_cache: bool = True
     compile_generation: bool = False
-    cache_implementation: Literal["dynamic", "static"] = "static"
     progress_bar: bool = True
     num_return_sequences: int = 1
 

@@ -519,7 +519,7 @@ def generate(
         thres = config.return_nb_thres_init - config.return_nb_thres_decay * step / config.max_new_tokens
         all_kt_complete = sum(group_eff_lens) >= round(kt_n_gen * bs_roots * thres)
 
-        rank = dist.get_rank()
+        rank = dist.get_rank() if config.sync_gpus else 0
         if all_kt_complete:
             max_step = max(config.rollout_filter_steps)
             for branch in branch_info:
@@ -603,6 +603,8 @@ def generate(
     suppress_ratio = all_suppressed / (bs_roots * config.num_return_sequences * config.max_new_tokens)
     empty_branch_ratio = 1 - len(branch_info) / (bs_roots * config.num_return_sequences)
     total_saturate_len = sum(max(branch_info[b].birth_step for b in g) for g in groups.values())
+    stop_lens[stop_lens == 0] = config.max_new_tokens
+    total_length = int(stop_lens.sum())
 
     return GenerateKeyTokenOutput(
         sequences=cast(torch.LongTensor, sequences),
@@ -610,6 +612,6 @@ def generate(
         suppress_ratio=suppress_ratio,
         empty_branch_ratio=empty_branch_ratio,
         num_seq=len(branch_info),
-        branching_ratio=all_branching_token_count / int(stop_lens.sum().item()),
+        branching_ratio=all_branching_token_count / total_length,
         avg_saturate_len=total_saturate_len / len(groups),
     )
