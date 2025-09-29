@@ -175,7 +175,9 @@ def _sample_new_sequence_with_rollout(
     global_valid_ids = current_ids[valid_rows, input_len:]
     global_valid_topk_ids = topk_ids[valid_rows]
     global_valid_topk_probs = topk_probs[valid_rows]
+    kt_filter_start = time.time()
     global_valid_masks = key_token_filters(global_valid_ids, global_valid_topk_ids, global_valid_topk_probs)
+    times["kt_sample/sample_mask/kt_filter"] = time.time() - kt_filter_start
     branching_token_count = global_valid_masks[:, 1:].sum()
 
     # 3) Build tri-state sample mask for all rows (0=keep, 1=invalid, 2=suppress)
