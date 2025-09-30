@@ -119,6 +119,7 @@ def _init_generation_config(
         config.rollout_filter_steps,
         kt_modules.sched.rollout_filter_edit_dist_thres,
         kt_modules.sched.rollout_filter_suffix_match_thres,
+        kt_modules.sched.rollout_filter_rouge_l_thres,
         kt_modules.sched.model_filter_rollout_thres,
         kt_modules.sched.cumulative_prob_filter_thres,
         config.cumulative_prob_filter_interval,

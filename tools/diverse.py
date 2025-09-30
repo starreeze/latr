@@ -159,11 +159,12 @@ def inference(args: EvalArgs):
         num_return_sequences=args.num_generation,
         return_on_full=False,
         sample_nk="full",
-        rollout_filter_edit_dist_thres=0.5,
+        rollout_filter_edit_dist_thres=None,
         rollout_filter_suffix_match_thres=0.2,
-        prob_filter_abs_thres=0.25,
-        prob_filter_rel_thres=0.15,
-        rollout_filter_steps=[20, 30, 50],
+        rollout_filter_rouge_l_thres=0.4,
+        prob_filter_abs_thres=0.2,
+        prob_filter_rel_thres=0.2,
+        rollout_filter_steps=[10, 20, 30, 50],
     )
     kt_modules = KtModules()
     group_metrics = []

@@ -11,8 +11,8 @@ from torchaudio.functional import edit_distance
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 from model.diverge import DivCollator, DivJudge
+from model.metrics import rouge_l_score, suffix_match_score
 from model.utils import BranchInfo
-from tools.utils import suffix_match_len
 
 math_core_symbols = "+-*/\\<>=()[]{}_^&%$0123456789"
 
@@ -236,6 +236,7 @@ class RolloutFilter(SequenceFilter):
         rollout_filter_steps: list[int],
         edit_dist_thres: float | None,
         suffix_match_thres: float | None,
+        rouge_l_thres: float | None,
         model_filter_thres: float | None,
         tokenizer: PreTrainedTokenizer,
         filter_model: DivJudge | None,
@@ -244,6 +245,7 @@ class RolloutFilter(SequenceFilter):
         self.rollout_filter_steps = rollout_filter_steps
         self.edit_dist_thres = edit_dist_thres
         self.suffix_match_thres = suffix_match_thres
+        self.rouge_l_thres = rouge_l_thres
         self.model_filter_thres = model_filter_thres
         self.filter_model = filter_model
         self.tokenizer = tokenizer
@@ -303,13 +305,18 @@ class RolloutFilter(SequenceFilter):
 
         # Other criteria
         for (idx, length), sample in zip(meta, model_batch):
+            a, b = sample["a"].tolist(), sample["b"].tolist()
             if self.edit_dist_thres is not None:
-                ratio = edit_distance(sample["a"], sample["b"]) / length
+                ratio = edit_distance(a, b) / length
                 if ratio < self.edit_dist_thres:
                     remove_set.add(idx)
             if self.suffix_match_thres is not None:
-                ratio = suffix_match_len(sample["a"], sample["b"]) / length
+                ratio = suffix_match_score(a, b)
                 if ratio > self.suffix_match_thres:
+                    remove_set.add(idx)
+            if self.rouge_l_thres is not None:
+                ratio = rouge_l_score(a, b)
+                if ratio > self.rouge_l_thres:
                     remove_set.add(idx)
 
         return remove_set, len(model_batch)
@@ -427,6 +434,7 @@ def create_sequence_filter(
     rollout_filter_steps: list[int],
     edit_dist_thres: float | None,
     suffix_match_thres: float | None,
+    rouge_l_thres: float | None,
     model_filter_thres: float | None,
     cumulative_prob_filter_thres: float | None,
     cumulative_prob_filter_interval: int,
@@ -435,11 +443,12 @@ def create_sequence_filter(
 ) -> SequenceFilterList:
     filters = []
 
-    if edit_dist_thres is not None or model_filter_thres is not None:
+    if edit_dist_thres or model_filter_thres or suffix_match_thres or rouge_l_thres:
         rollout_filter = RolloutFilter(
             rollout_filter_steps,
             edit_dist_thres,
             suffix_match_thres,
+            rouge_l_thres,
             model_filter_thres,
             tokenizer,
             filter_model,

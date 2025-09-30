@@ -32,6 +32,7 @@ class BranchDynamicParam:
     similarity_filter_thres: float | None = None
     rollout_filter_edit_dist_thres: float | None = 0.4
     rollout_filter_suffix_match_thres: float | None = None
+    rollout_filter_rouge_l_thres: float | None = None
     model_filter_cand_thres: float | None = None  # the higher the more loose
     model_filter_rollout_thres: float | None = None  # the higher the more loose
     cumulative_prob_filter_thres: float | None = None  # the higher the more loose
@@ -103,6 +104,10 @@ class BranchParamScheduler(BranchDynamicParam):
             self.similarity_filter_thres -= self.param_scheduler_step
         if self.rollout_filter_edit_dist_thres is not None:
             self.rollout_filter_edit_dist_thres += self.param_scheduler_step
+        if self.rollout_filter_suffix_match_thres is not None:
+            self.rollout_filter_suffix_match_thres -= self.param_scheduler_step
+        if self.rollout_filter_rouge_l_thres is not None:
+            self.rollout_filter_rouge_l_thres -= self.param_scheduler_step
         if self.model_filter_cand_thres is not None:
             self.model_filter_cand_thres -= self.param_scheduler_step
         if self.model_filter_rollout_thres is not None:
