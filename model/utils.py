@@ -31,6 +31,7 @@ class BranchDynamicParam:
     prob_filter_rel_thres: float | None = 0.15
     similarity_filter_thres: float | None = None
     rollout_filter_edit_dist_thres: float | None = 0.4
+    rollout_filter_suffix_match_thres: float | None = None
     model_filter_cand_thres: float | None = None  # the higher the more loose
     model_filter_rollout_thres: float | None = None  # the higher the more loose
     cumulative_prob_filter_thres: float | None = None  # the higher the more loose
@@ -56,7 +57,7 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     output_hidden_states: bool = False
     max_n_branch_per_token: int = 2
     # full: do sample only when branches are full; always: do sample whenever there is only one valid candidate
-    sample_nk: Literal["none", "full", "always"] = "none"
+    sample_nk: Literal["none", "full", "always"] = "full"
     # return the incomplete sequences when the branches are all full in generation
     return_on_full: bool = True
     return_nb_thres_init: float = 0.98  # higher than thres are considered full at initial step
@@ -73,7 +74,7 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     model_filter_path: str | None = None
     rollout_filter_steps: list[int] = field(default_factory=lambda: [20, 30, 50])
     cumulative_prob_filter_interval: int = 10
-    token_filter_keep_math: bool = True
+    keep_math_symbols: bool = True
 
 
 @dataclass
@@ -149,6 +150,7 @@ class GenerateKeyTokenOutput(GenerateDecoderOnlyOutput):
     empty_branch_ratio: float | None = None
     num_seq: int | None = None
     branching_ratio: float | None = None
+    pruning_ratio: float | None = None
     avg_saturate_len: float | None = None
 
 
@@ -258,6 +260,14 @@ class BranchInfo:
 
         return new_branch
 
+    def get_descendants(self, idx: int) -> list[int]:
+        res = list(self.branches[idx].children)
+        i = 0
+        while i < len(res):
+            res.extend(self.branches[res[i]].children)
+            i += 1
+        return res
+
     def __getitem__(self, idx) -> Branch:
         return self.branches[idx]
 
@@ -338,8 +348,7 @@ class BranchInfo:
 
     def get_num_branch(self, id: int) -> int:
         """Return the number of branches that have the same root."""
-        root_branch = self.branches[self.branches[id].root]
-        return len(root_branch.children) + 1
+        return len(self.get_descendants(self.branches[id].root)) + 1
 
     def get_root_branches_repr(self, max_n_display=8) -> str:
         groups = self.group_by_root()

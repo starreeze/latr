@@ -160,9 +160,10 @@ def inference(args: EvalArgs):
         return_on_full=False,
         sample_nk="full",
         rollout_filter_edit_dist_thres=0.5,
-        prob_filter_abs_thres=0.2,
-        prob_filter_rel_thres=0.1,
-        rollout_filter_steps=[10, 20, 30],
+        rollout_filter_suffix_match_thres=0.2,
+        prob_filter_abs_thres=0.25,
+        prob_filter_rel_thres=0.15,
+        rollout_filter_steps=[20, 30, 50],
     )
     kt_modules = KtModules()
     group_metrics = []
@@ -179,7 +180,7 @@ def inference(args: EvalArgs):
                 attention_mask=batch["attention_mask"].repeat_interleave(args.num_generation, dim=0),
                 temperature=args.temperature,
                 top_p=args.top_p,
-                top_k=args.top_k,
+                top_k=args.top_k if args.top_k > 0 else None,
                 max_new_tokens=args.max_tokens,
                 do_sample=True,
                 return_dict_in_generate=True,
@@ -209,7 +210,11 @@ def inference(args: EvalArgs):
             ) / len(vals)
             pass_k = int(pass_1 > 0)
             add_info = (
-                {"saturate_len": outputs.avg_saturate_len, "branching_ratio": outputs.branching_ratio}
+                {
+                    "saturate_len": outputs.avg_saturate_len,
+                    "branching_ratio": outputs.branching_ratio,
+                    "pruning_ratio": outputs.pruning_ratio,
+                }
                 if args.method == "our"
                 else {}
             )

@@ -30,7 +30,7 @@ from model.utils import (
     KeyTokenGenConfig,
     MixedCache,
 )
-from tools.utils import get_repeat_interleave, init_dataclass_from_dict
+from tools.utils import get_repeat_interleave, init_dataclass_from_dict, update_additive_stats
 
 
 @dataclass
@@ -118,11 +118,12 @@ def _init_generation_config(
         kt_n_gen,
         config.rollout_filter_steps,
         kt_modules.sched.rollout_filter_edit_dist_thres,
+        kt_modules.sched.rollout_filter_suffix_match_thres,
         kt_modules.sched.model_filter_rollout_thres,
         kt_modules.sched.cumulative_prob_filter_thres,
         config.cumulative_prob_filter_interval,
         kt_modules.filter,
-        config.token_filter_keep_math,
+        config.keep_math_symbols,
     )
 
     return (config, sequence_filters, key_token_filters, stopping_criteria, logits_proc)
@@ -162,8 +163,12 @@ def _sample_new_sequence_with_rollout(
     times["kt_sample/topk"] = sample_mask_start - topk_start
 
     # 2) Build variable-length prefix-trimmed sequences for valid (non-complete) rows
-    valid_rows = torch.nonzero(~complete_mask, as_tuple=False).squeeze(-1)
-    valid_counts = int(valid_rows.numel())
+    valid_row_mask = ~complete_mask
+    valid_counts = int(valid_row_mask.sum())
+
+    global_info_start = time.time()
+    times["kt_sample/sample_mask/count_valid"] = global_info_start - sample_mask_start
+
     if not valid_counts:
         assert sync_gpus, "All sequences are already completed"
         pad_tensor = torch.full((batch_size, 1), eos_id, device=device, dtype=current_ids.dtype)
@@ -172,24 +177,30 @@ def _sample_new_sequence_with_rollout(
         attention_mask = torch.cat([attention_mask, ones_col], dim=1)
         return current_ids, attention_mask, cache, times, 0
 
-    global_valid_ids = current_ids[valid_rows, input_len:]
-    global_valid_topk_ids = topk_ids[valid_rows]
-    global_valid_topk_probs = topk_probs[valid_rows]
+    global_valid_ids = current_ids[valid_row_mask, input_len:]
+    global_valid_topk_ids = topk_ids[valid_row_mask]
+    global_valid_topk_probs = topk_probs[valid_row_mask]
+
     kt_filter_start = time.time()
+    times["kt_sample/sample_mask/global_info"] = kt_filter_start - global_info_start
+
     global_valid_masks = key_token_filters(global_valid_ids, global_valid_topk_ids, global_valid_topk_probs)
-    times["kt_sample/sample_mask/kt_filter"] = time.time() - kt_filter_start
+
+    final_state_start = time.time()
+    times["kt_sample/sample_mask/kt_filter"] = final_state_start - kt_filter_start
+
     branching_token_count = global_valid_masks[:, 1:].sum()
 
     # 3) Build tri-state sample mask for all rows (0=keep, 1=invalid, 2=suppress)
     sample_masks = torch.ones_like(topk_ids, dtype=torch.int8)
     # assign filter results back
-    sample_masks[valid_rows] = 1 - global_valid_masks.to(torch.int8)
+    sample_masks[valid_row_mask] = 1 - global_valid_masks.to(torch.int8)
     # first candidate is always valid for both non-complete and complete rows
     sample_masks[:, 0] = 0
     # NOTE: it is possible to put aside the finished sequences and make space for more branches
 
     capacity_assign_start = time.time()
-    times["kt_sample/sample_mask"] = capacity_assign_start - sample_mask_start
+    times["kt_sample/sample_mask/final_state"] = capacity_assign_start - final_state_start
 
     # 4) Per-root capacity: group sequences by root and calc cap independently
     groups = branch_info.group_by_root()
@@ -390,6 +401,7 @@ def generate(
     branch_info = BranchInfo(n_roots=bs_roots) if kt_n_gen else None
     all_suppressed = 0
     all_branching_token_count = 0
+    sequence_filter_stats: dict[str, dict[str, int]] = {}
     times = defaultdict(float)
     printed_complete = False
 
@@ -468,8 +480,7 @@ def generate(
                 eos_id,
                 config.sync_gpus,
             )
-            for k, v in kt_times.items():
-                times[k] += v
+            update_additive_stats(times, kt_times)
             all_branching_token_count += branching_token_count
 
             filter_start = time.time()
@@ -478,18 +489,17 @@ def generate(
             # Rollout filtering
             if sequence_filters is not None:
                 completion_ids = kt_ids[:, input_len:]
-                remove_set, sf_times = sequence_filters(completion_ids, branch_info, step + 1)
+                remove_set, sf_times, sf_stats = sequence_filters(completion_ids, branch_info, step + 1)
+                update_additive_stats(sequence_filter_stats, sf_stats)
+                update_additive_stats(times, sf_times)
 
-                for k, v in sf_times.items():
-                    times[k] += v
                 update_remove_start = time.time()
                 times["kt_seq_filter"] += update_remove_start - filter_start
 
                 kt_ids, stop_lens, cache, new_attn, rm_times = branch_info.remove(
                     kt_ids, stop_lens, cache, remove_set, kt_mask, orig_n_samples
                 )
-                for k, v in rm_times.items():
-                    times[k] += v
+                update_additive_stats(times, rm_times)
                 if new_attn is not None:
                     kt_mask = new_attn
 
@@ -607,6 +617,7 @@ def generate(
     total_saturate_len = sum(max(branch_info[b].birth_step for b in g) for g in groups.values())
     stop_lens[stop_lens == 0] = config.max_new_tokens
     total_length = int(stop_lens.sum())
+    rf_stats = sequence_filter_stats["RolloutFilter"]
 
     return GenerateKeyTokenOutput(
         sequences=cast(torch.LongTensor, sequences),
@@ -615,5 +626,6 @@ def generate(
         empty_branch_ratio=empty_branch_ratio,
         num_seq=len(branch_info),
         branching_ratio=all_branching_token_count / total_length,
+        pruning_ratio=rf_stats["remove"] / rf_stats["total"],
         avg_saturate_len=total_saturate_len / len(groups),
     )

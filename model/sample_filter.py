@@ -12,6 +12,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 
 from model.diverge import DivCollator, DivJudge
 from model.utils import BranchInfo
+from tools.utils import suffix_match_len
 
 math_core_symbols = "+-*/\\<>=()[]{}_^&%$0123456789"
 
@@ -218,27 +219,31 @@ class SequenceFilter(ABC):
     "sequence based filter: determine whether a sequence should be deleted"
 
     @abstractmethod
-    def __call__(self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int) -> set[int]:
-        "return remove indices"
+    def __call__(
+        self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int
+    ) -> tuple[set[int], int]:
+        "return remove indices and the number of total comparisons"
         pass
 
 
 class RolloutFilter(SequenceFilter):
     """
-    Rollout filter that applies edit distance comparison between sequences from sibling branches.
+    Rollout filter that applies edit distance comparison between sequences.
     """
 
     def __init__(
         self,
         rollout_filter_steps: list[int],
-        rollout_filter_edit_dist_thres: float | None,
+        edit_dist_thres: float | None,
+        suffix_match_thres: float | None,
         model_filter_thres: float | None,
         tokenizer: PreTrainedTokenizer,
         filter_model: DivJudge | None,
-        keep_math_core_symbols: bool = False,
+        keep_math_core_symbols: bool,
     ):
         self.rollout_filter_steps = rollout_filter_steps
-        self.rollout_filter_edit_dist_thres = rollout_filter_edit_dist_thres
+        self.edit_dist_thres = edit_dist_thres
+        self.suffix_match_thres = suffix_match_thres
         self.model_filter_thres = model_filter_thres
         self.filter_model = filter_model
         self.tokenizer = tokenizer
@@ -246,12 +251,12 @@ class RolloutFilter(SequenceFilter):
         self.keep_math_core_symbols = keep_math_core_symbols
         self.eos_id = cast(int, tokenizer.eos_token_id)
 
-    def __call__(self, completion_ids: torch.Tensor, branch_info: BranchInfo, current_step: int) -> set[int]:
+    def __call__(
+        self, completion_ids: torch.Tensor, branch_info: BranchInfo, current_step: int
+    ) -> tuple[set[int], int]:
         """
         Apply rollout filter by comparing edit distances and model scores of sequences from branches
         created `rollout_filter_steps` steps ago.
-
-        Returns a single set of sequence indices (w.r.t. current batch ordering) to remove.
         """
         remove_set: set[int] = set()
         model_batch = []
@@ -280,14 +285,14 @@ class RolloutFilter(SequenceFilter):
 
         if self.keep_math_core_symbols:
             model_batch = list(
-                filter(
+                filter(  # we should only consider those that are not math core symbols
                     lambda x: self.tokenizer.decode([x["b"][0].item()]).strip() not in math_core_symbols,
                     model_batch,
                 )
             )
 
         if not model_batch:
-            return remove_set
+            return remove_set, 0
 
         # Model scores in one call
         if self.filter_model is not None:
@@ -296,14 +301,18 @@ class RolloutFilter(SequenceFilter):
                 if score > self.model_filter_thres:
                     remove_set.add(idx)
 
-        # Edit distance criteria in one pass
-        if self.rollout_filter_edit_dist_thres is not None:
-            for (idx, length), sample in zip(meta, model_batch):
+        # Other criteria
+        for (idx, length), sample in zip(meta, model_batch):
+            if self.edit_dist_thres is not None:
                 ratio = edit_distance(sample["a"], sample["b"]) / length
-                if ratio < self.rollout_filter_edit_dist_thres:
+                if ratio < self.edit_dist_thres:
+                    remove_set.add(idx)
+            if self.suffix_match_thres is not None:
+                ratio = suffix_match_len(sample["a"], sample["b"]) / length
+                if ratio > self.suffix_match_thres:
                     remove_set.add(idx)
 
-        return remove_set
+        return remove_set, len(model_batch)
 
 
 class CumulativeProbFilter(SequenceFilter):
@@ -319,9 +328,11 @@ class CumulativeProbFilter(SequenceFilter):
         self.eos_id = eos_id
         self.kt_n_gen = kt_n_gen
 
-    def __call__(self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int) -> set[int]:
+    def __call__(
+        self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int
+    ) -> tuple[set[int], int]:
         if current_step % self.interval:
-            return set()
+            return set(), 0
 
         remove_set: set[int] = set()
         has_eos = (sequences == self.eos_id).any(dim=-1)
@@ -337,7 +348,7 @@ class CumulativeProbFilter(SequenceFilter):
                 if b.parent is not None and b.accumulated_logp - max_p < self.log_thres * current_step:
                     remove_set.add(idx)
 
-        return remove_set
+        return remove_set, len(sequences)
 
 
 class SequenceFilterList:
@@ -346,15 +357,18 @@ class SequenceFilterList:
 
     def __call__(
         self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int
-    ) -> tuple[set[int], dict[str, float]]:
+    ) -> tuple[set[int], dict[str, float], dict[str, dict[str, int]]]:
         remove_set: set[int] = set()
         times = {}
+        comparisons = {}
         for filter in self.filters:
+            name = filter.__class__.__name__
             start = time.time()
-            remove_set.update(filter(sequences, branch_info, current_step))
-            name = f"kt_seq_filter/{filter.__class__.__name__}"
-            times[name] = time.time() - start
-        return remove_set, times
+            idx_to_remove, num_comparisons = filter(sequences, branch_info, current_step)
+            remove_set.update(idx_to_remove)
+            times[f"kt_seq_filter/{name}"] = time.time() - start
+            comparisons[name] = {"remove": len(idx_to_remove), "total": num_comparisons}
+        return remove_set, times, comparisons
 
     def append(self, filter: SequenceFilter):
         self.filters.append(filter)
@@ -411,7 +425,8 @@ def create_sequence_filter(
     tokenizer: PreTrainedTokenizer,
     kt_n_gen: int,
     rollout_filter_steps: list[int],
-    rollout_filter_edit_dist_thres: float | None,
+    edit_dist_thres: float | None,
+    suffix_match_thres: float | None,
     model_filter_thres: float | None,
     cumulative_prob_filter_thres: float | None,
     cumulative_prob_filter_interval: int,
@@ -420,10 +435,11 @@ def create_sequence_filter(
 ) -> SequenceFilterList:
     filters = []
 
-    if rollout_filter_edit_dist_thres is not None or model_filter_thres is not None:
+    if edit_dist_thres is not None or model_filter_thres is not None:
         rollout_filter = RolloutFilter(
             rollout_filter_steps,
-            rollout_filter_edit_dist_thres,
+            edit_dist_thres,
+            suffix_match_thres,
             model_filter_thres,
             tokenizer,
             filter_model,

@@ -2,15 +2,11 @@ import dataclasses
 import os
 import random
 import re
-import warnings
-from datetime import datetime
 from types import UnionType
-from typing import Iterable, Literal, TypeVar, Union, cast, get_args, get_origin, overload
+from typing import Any, Iterable, Literal, TypeVar, Union, get_args, get_origin, overload
 
 import numpy as np
 import torch
-from scipy.stats import norm
-from transformers.tokenization_utils import PreTrainedTokenizer
 
 
 def set_seed(seed: int = 42):
@@ -265,47 +261,6 @@ def convert_padding_side(
     return res
 
 
-def transform_to_norm(X: np.ndarray, mu: float, sigma: float) -> np.ndarray:
-    """
-    Transform X to a normal distribution with mean mu and std sigma. Requirements:
-    1. the same value in X should be mapped to the same value in the normal distribution
-    2. larger values in X should be mapped to larger values in the normal distribution
-    """
-    if X.size == 0:
-        # Preserve shape for empty arrays, ensure float dtype for consistency
-        return np.empty(X.shape, dtype=float)
-
-    original_shape = X.shape
-    # Flatten the array for np.unique, as it handles multi-dimensional arrays by flattening.
-    # np.unique also sorts the unique elements.
-    X_flat = X.flatten()
-
-    # Get unique elements and the indices to reconstruct the original array
-    unique_elements, inverse_indices = np.unique(X_flat, return_inverse=True)
-    n_unique = len(unique_elements)
-
-    # Calculate rank-based percentiles for unique elements.
-    # Ranks are 0 to n_unique-1 for the sorted unique_elements.
-    # Adding 0.5 to ranks before dividing ensures percentiles are in (0, 1),
-    # avoiding norm.ppf(0) = -inf and norm.ppf(1) = inf.
-    # Using dtype=float for arange to ensure float division.
-    percentiles = (np.arange(n_unique, dtype=float) + 0.5) / n_unique
-
-    # Map percentiles to z-scores (values from a standard normal distribution N(0,1))
-    z_scores = norm.ppf(percentiles)
-
-    # Transform z-scores to the target normal distribution N(mu, sigma)
-    transformed_unique_elements = z_scores * sigma + mu
-
-    # Map transformed unique values back to their original positions in the flattened array
-    transformed_flat_X = transformed_unique_elements[inverse_indices]
-
-    # Reshape the transformed flat array back to the original shape of X
-    transformed_X = transformed_flat_X.reshape(original_shape)
-
-    return transformed_X
-
-
 def init_dataclass_from_dict(class_type: type[T], args: dict, auto_cast: bool = True) -> T:
     """
     Initialize a dataclass from a dictionary.
@@ -352,39 +307,20 @@ def init_dataclass_from_dict(class_type: type[T], args: dict, auto_cast: bool = 
     return class_type(**d)
 
 
-def encode_latent(latent_token: str, sequence: str) -> str:
-    """
-    replace consecutive latent tokens with a single token and a number.
-    """
-    escaped = re.escape(latent_token)
-    return re.sub(
-        rf"({escaped})\1+", lambda m: f"[{m.group(1)}_{len(m.group(0)) // len(latent_token)}]", sequence
-    )
-
-
-def count_latent(latent_token: str, encoded: str) -> int:
-    """
-    count the number of latent tokens in an encoded string.
-    """
-    pattern = re.compile(rf"\[{re.escape(latent_token)}_(\d+)\]")
-    return sum(int(m.group(1)) for m in pattern.finditer(encoded))
-
-
-def get_latent_backbone(instance) -> type:
-    mro_names = [cls.__module__.lower() + "." + cls.__name__.lower() for cls in instance.__class__.mro()]
-    if not any("meta" in name for name in mro_names):
-        return instance.__class__  # no meta; self is the backbone
-
-    for cls, name in zip(instance.__class__.mro()[1:], mro_names[1:]):  # skip self (might not contain meta)
-        if "meta" not in name:
-            return cls
-    raise RuntimeError("Could not find backbone model class in MRO")
+def update_additive_stats(stats: dict[str, Any], new_stats: dict[str, Any]):
+    "add new_stats to stats for all keys. They two must have identical structure (can be nested)"
+    for k, v in new_stats.items():
+        if k not in stats:
+            stats[k] = v
+            continue
+        if isinstance(v, dict):
+            update_additive_stats(stats[k], v)
+        else:
+            stats[k] += v
 
 
 def camel_to_snake(name: str, split="_") -> str:
     """Convert CamelCase to snake_case."""
-    import re
-
     # Insert underscore before uppercase letters that follow lowercase letters
     s1 = re.sub("(.)([A-Z][a-z]+)", rf"\1{split}\2", name)
     # Insert underscore before uppercase letters that follow lowercase letters or digits
@@ -394,30 +330,6 @@ def camel_to_snake(name: str, split="_") -> str:
 def snake_to_camel(name: str, split="_") -> str:
     """Convert snake_case to CamelCase."""
     return "".join(word.capitalize() for word in name.split(split))
-
-
-def verify_generation(input_ids: torch.Tensor, output_ids: torch.Tensor, tokenizer: PreTrainedTokenizer):
-    bs, input_len = input_ids.shape
-    equals = torch.all(input_ids == output_ids[:, :input_len], dim=1)
-    non_equal_idx = cast(int, find_values(equals, 0).item())
-    if non_equal_idx < bs:
-        dump_file = f"logs/bs_{non_equal_idx}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        os.makedirs(os.path.dirname(dump_file), exist_ok=True)
-        with open(dump_file, "w") as f:
-            f.write(f"input_str: {tokenizer.decode(input_ids[non_equal_idx])}\n")
-            f.write(f"output_str: {tokenizer.decode(output_ids[non_equal_idx])}")
-        warnings.warn(
-            f"input_ids and output_ids are not equal in sample {non_equal_idx}. Dumps saved to {dump_file}"
-        )
-
-
-def get_model_property_from_accelerate(model: torch.nn.Module, property_name: str):
-    if hasattr(model, property_name):
-        return getattr(model, property_name)
-    elif hasattr(model, "module") and hasattr(model.module, property_name):
-        return getattr(model.module, property_name)
-    else:
-        raise ValueError(f"Property {property_name} not found in model")
 
 
 def is_same_sequence(seqs: torch.Tensor) -> bool:
@@ -491,3 +403,53 @@ def get_repeat_interleave(x: torch.Tensor) -> int:
             raise ValueError("Input tensor is not interleaved")
 
     return interval
+
+
+def suffix_match_len(a: torch.Tensor, b: torch.Tensor) -> int:
+    assert a.ndim == 1 and b.ndim == 1 and a.shape[0] == b.shape[0] > 0
+    la = a.tolist()
+    lb = b.tolist()
+
+    def longest_prefix_in_text(pattern: list, text: list) -> int:
+        """
+        Return the maximum length L such that pattern[:L] occurs as a contiguous
+        subsequence in text. Runs in O(len(pattern) + len(text)).
+        """
+        m = len(pattern)
+        if m == 0:
+            return 0
+
+        # Build prefix function (pi) for KMP
+        pi = [0] * m
+        j = 0
+        for i in range(1, m):
+            while j > 0 and pattern[i] != pattern[j]:
+                j = pi[j - 1]
+            if pattern[i] == pattern[j]:
+                j += 1
+            pi[i] = j
+
+        # Scan text, tracking longest prefix match length observed
+        q = 0
+        best = 0
+        for t in text:
+            while q > 0 and pattern[q] != t:
+                q = pi[q - 1]
+            if pattern[q] == t:
+                q += 1
+            if q > best:
+                best = q
+            if q == m:
+                # Allow overlaps to continue scanning
+                q = pi[q - 1]
+        return best
+
+    # Suffix of a equals prefix of reversed(a); match anywhere in reversed(b)
+    ra = la[::-1]
+    rb = lb[::-1]
+    l1 = longest_prefix_in_text(ra, rb)
+
+    # Suffix of b equals prefix of reversed(b); match anywhere in reversed(a)
+    l2 = longest_prefix_in_text(rb, ra)
+
+    return max(l1, l2)
