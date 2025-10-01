@@ -125,6 +125,7 @@ def _init_generation_config(
         config.cumulative_prob_filter_interval,
         kt_modules.filter,
         config.keep_math_symbols,
+        config.random_pruning_ratio,
     )
 
     return (config, sequence_filters, key_token_filters, stopping_criteria, logits_proc)
@@ -146,6 +147,7 @@ def _sample_new_sequence_with_rollout(
     input_len: int,
     eos_id: int,
     sync_gpus: bool,
+    random_branching_ratio: float,
 ) -> tuple[torch.Tensor, torch.Tensor, MixedCache, dict[str, float], int]:
     """
     Unified batched sampling and branching across all roots.
@@ -181,11 +183,23 @@ def _sample_new_sequence_with_rollout(
     global_valid_ids = current_ids[valid_row_mask, input_len:]
     global_valid_topk_ids = topk_ids[valid_row_mask]
     global_valid_topk_probs = topk_probs[valid_row_mask]
+    valid_bs = global_valid_ids.shape[0]
 
     kt_filter_start = time.time()
     times["kt_sample/sample_mask/global_info"] = kt_filter_start - global_info_start
 
-    global_valid_masks = key_token_filters(global_valid_ids, global_valid_topk_ids, global_valid_topk_probs)
+    if random_branching_ratio >= 0:
+        # only consider the second token for random branching
+        second_mask = torch.rand(valid_bs, 1, device=device) < random_branching_ratio
+        after_second = torch.zeros(valid_bs, max_n_branch_per_token - 2, device=device, dtype=torch.bool)
+        global_valid_masks = torch.cat([second_mask, after_second], dim=1)
+    else:
+        global_valid_masks = key_token_filters(
+            global_valid_ids, global_valid_topk_ids, global_valid_topk_probs
+        )
+
+    first_mask = torch.ones([valid_bs, 1], device=device, dtype=torch.bool)
+    global_valid_masks = torch.cat([first_mask, global_valid_masks], dim=1)
 
     final_state_start = time.time()
     times["kt_sample/sample_mask/kt_filter"] = final_state_start - kt_filter_start
@@ -296,16 +310,13 @@ def _sample_new_sequence_with_rollout(
     ones_col = torch.ones((batch_size, 1), device=device, dtype=attention_mask.dtype)
     attention_mask = torch.cat([attention_mask, ones_col], dim=1)
 
-    cat_cache_start = time.time()
-    times["kt_sample/cat_id"] = cat_cache_start - cat_id_start
-
     # 7) Concatenate new sequences and caches
     if new_branch_seqs:
         current_ids = torch.cat([current_ids, *new_branch_seqs])
         attention_mask = torch.cat([attention_mask, *new_branch_attn])
         cache.append_dup_kt_rows(dup_kt_rows)
 
-    times["kt_sample/cat_cache"] = time.time() - cat_cache_start
+    times["kt_sample/cat_id_cache"] = time.time() - cat_id_start
 
     assert len(current_ids) == len(attention_mask) == (sample_masks == 0).sum()
     return current_ids, attention_mask, cache, times, int(branching_token_count.item())
@@ -480,6 +491,7 @@ def generate(
                 input_len,
                 eos_id,
                 config.sync_gpus,
+                config.random_branching_ratio,
             )
             update_additive_stats(times, kt_times)
             all_branching_token_count += branching_token_count

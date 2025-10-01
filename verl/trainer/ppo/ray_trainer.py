@@ -36,6 +36,7 @@ from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from tools.common_filter import DiverseFilter
 from tools.utils import find_values
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
@@ -1190,9 +1191,12 @@ class RayPPOTrainer:
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
-                gen_batch = gen_batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                )
+
+                # !!!!!!!!!!!!!!!!!! modify
+                rollout_config = self.config.actor_rollout_ref.rollout
+                n_repeat = rollout_config.get("gen_n", rollout_config.n)
+                gen_batch = gen_batch.repeat(repeat_times=n_repeat, interleave=True)
+                # !!!!!!!!!!!!!!!!!! end modify
 
                 is_last_step = self.global_steps >= self.total_training_steps
 
@@ -1232,9 +1236,14 @@ class RayPPOTrainer:
                         [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                     )
                     # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(
-                        repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True
-                    )
+                    # !!!!!!!!!!!!!!!!!! modify
+                    if n_repeat != rollout_config.n:
+                        seqs = gen_batch_output.batch["responses"]
+                        filter = DiverseFilter(k=rollout_config.n)
+                        indices = filter(seqs, self.tokenizer.pad_token_id)
+                        gen_batch_output = gen_batch_output.select(indices)
+                    batch = batch.repeat(repeat_times=rollout_config.n, interleave=True)
+                    # !!!!!!!!!!!!!!!!!! end modify
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():

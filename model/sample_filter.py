@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 import time
 from abc import ABC, abstractmethod
 from typing import Iterable, Optional, cast
@@ -195,14 +196,13 @@ class KeyTokenFilterList:
     def __call__(
         self, sequences: torch.Tensor, candidates: torch.Tensor, probs: torch.Tensor
     ) -> torch.Tensor:
-        "return shape: (batch, n_cand) with the first token always kept"
+        "return shape: (batch, n_cand-1) since the first token is always kept"
         batch, n_cand = candidates.shape
         mask = torch.ones([batch, n_cand - 1], device=candidates.device, dtype=torch.bool)
         for filter in self.filters:
             mask = mask & filter(sequences, candidates, probs)
             if not mask.any():
                 break
-        mask = torch.cat([torch.ones([batch, 1], device=candidates.device, dtype=torch.bool), mask], dim=1)
         return mask
 
     def append(self, filter: KeyTokenFilter):
@@ -241,6 +241,7 @@ class RolloutFilter(SequenceFilter):
         tokenizer: PreTrainedTokenizer,
         filter_model: DivJudge | None,
         keep_math_core_symbols: bool,
+        random_pruning_ratio: float,
     ):
         self.rollout_filter_steps = rollout_filter_steps
         self.edit_dist_thres = edit_dist_thres
@@ -251,6 +252,7 @@ class RolloutFilter(SequenceFilter):
         self.tokenizer = tokenizer
         self.collator = DivCollator(tokenizer)
         self.keep_math_core_symbols = keep_math_core_symbols
+        self.random_pruning_ratio = random_pruning_ratio
         self.eos_id = cast(int, tokenizer.eos_token_id)
 
     def __call__(
@@ -262,7 +264,8 @@ class RolloutFilter(SequenceFilter):
         """
         remove_set: set[int] = set()
         model_batch = []
-        meta: list[tuple[int, int]] = []  # (branch_idx, length)
+        candidate_ids = []
+        candidate_lens = []
 
         target_branch_ids = []
         for length in self.rollout_filter_steps:
@@ -283,7 +286,8 @@ class RolloutFilter(SequenceFilter):
             if torch.any((a == self.eos_id) | (b == self.eos_id)):
                 continue
             model_batch.append({"prefix": prefix, "a": a, "b": b})
-            meta.append((idx, length))
+            candidate_ids.append(idx)
+            candidate_lens.append(length)
 
         if self.keep_math_core_symbols:
             model_batch = list(
@@ -296,15 +300,19 @@ class RolloutFilter(SequenceFilter):
         if not model_batch:
             return remove_set, 0
 
+        if self.random_pruning_ratio >= 0:
+            remove_list = random.sample(candidate_ids, int(len(candidate_ids) * self.random_pruning_ratio))
+            return set(remove_list), len(model_batch)
+
         # Model scores in one call
         if self.filter_model is not None:
             scores = self.filter_model(**self.collator(model_batch)).scores
-            for (idx, _), score in zip(meta, scores):
+            for idx, score in zip(candidate_ids, scores):
                 if score > self.model_filter_thres:
                     remove_set.add(idx)
 
         # Other criteria
-        for (idx, length), sample in zip(meta, model_batch):
+        for idx, length, sample in zip(candidate_ids, candidate_lens, model_batch):
             a, b = sample["a"].tolist(), sample["b"].tolist()
             if self.edit_dist_thres is not None:
                 ratio = edit_distance(a, b) / length
@@ -440,6 +448,7 @@ def create_sequence_filter(
     cumulative_prob_filter_interval: int,
     filter_model: DivJudge | None,
     keep_math_core_symbols: bool,
+    random_pruning_ratio: float,
 ) -> SequenceFilterList:
     filters = []
 
@@ -453,6 +462,7 @@ def create_sequence_filter(
             tokenizer,
             filter_model,
             keep_math_core_symbols,
+            random_pruning_ratio,
         )
         filters.append(rollout_filter)
 

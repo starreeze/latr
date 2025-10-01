@@ -77,6 +77,10 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     cumulative_prob_filter_interval: int = 10
     keep_math_symbols: bool = True
 
+    # fallback for ablation study
+    random_branching_ratio: float = -1
+    random_pruning_ratio: float = -1
+
 
 @dataclass
 class KeyTokenGenConfig(KeyTokenGenConfigMixin, GenConfig):

@@ -284,22 +284,22 @@ def init_dataclass_from_dict(class_type: type[T], args: dict, auto_cast: bool = 
         # Handle Union types (e.g., int | None). Cast to the first argument type.
         origin = get_origin(_type)
         if origin in (Union, UnionType):
-            union_args = get_args(_type)
-            if len(union_args) > 0:
-                _type = union_args[0]
+            type_candidates = get_args(_type)
         elif origin is not None:
-            _type = origin
+            type_candidates = [origin]
+        else:
+            type_candidates = [_type]
         if value is not None:
             if isinstance(value, str):
                 try:
                     _value = eval(value)
-                    if isinstance(_value, _type):
+                    if any(isinstance(_value, _type) for _type in type_candidates):
                         value = _value
                 except Exception:
                     pass
             else:
                 try:
-                    value = _type(value)
+                    value = type_candidates[0](value)
                 except Exception:
                     pass
         d[name] = value
