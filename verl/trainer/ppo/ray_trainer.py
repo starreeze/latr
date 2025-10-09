@@ -1239,9 +1239,16 @@ class RayPPOTrainer:
                     # !!!!!!!!!!!!!!!!!! modify
                     if n_repeat != rollout_config.n:
                         seqs = gen_batch_output.batch["responses"]
+                        gen_bs = len(seqs) // n_repeat
+                        seqs = seqs.reshape(gen_bs, n_repeat, -1)
+
                         filter = DiverseFilter(k=rollout_config.n)
-                        indices = filter(seqs, self.tokenizer.pad_token_id)
-                        gen_batch_output = gen_batch_output.select(indices)
+                        max_workers = rollout_config.get("diversity_filter_n_workers", 1)
+                        indices = filter(seqs, self.tokenizer.pad_token_id, max_workers)
+                        selected = [
+                            index + i * n_repeat for i, sublist in enumerate(indices) for index in sublist
+                        ]
+                        gen_batch_output = gen_batch_output.select_idxs(selected)
                     batch = batch.repeat(repeat_times=rollout_config.n, interleave=True)
                     # !!!!!!!!!!!!!!!!!! end modify
                     batch = batch.union(gen_batch_output)
