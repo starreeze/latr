@@ -1,19 +1,22 @@
 import csv
+import json
+import re
 import sys
 
 
 def read_file(path: str) -> dict:
     with open(path, "r") as f:
-        lines = f.readlines()[-1000:]
+        content = f.read()
+    pattern = re.compile(r"validation metrics: (\{.*\})", re.DOTALL)
+    match = list(pattern.finditer(content))[-1].group(1)
+    if not match:
+        raise ValueError(f"No match found in {path}")
+
+    match = re.sub("\x1b\\[36m\\(TaskRunner pid=\\d+\\)\x1b\\[0m", "", match)
+    replaces = {"'": '"', "\n": "", "\r": "", '"': ""}
+    raw_metrics = json.loads(match.translate(str.maketrans(replaces)))
     metrics = {}
-    for line in lines:
-        if "wandb:" not in line:
-            continue
-        try:
-            k, v = line.split()[-2:]
-            dataset = k.split("/")[1]
-        except Exception:
-            continue
+    for k, v in raw_metrics.items():
         if k.endswith("acc/mean@8"):
             metric = "Acc-Pass@1"
         elif k.endswith("acc/best@8/mean"):
@@ -24,12 +27,12 @@ def read_file(path: str) -> dict:
             metric = "Len-Pass@8"
         else:
             continue
+        dataset = k.split("/")[1]
         try:
             value = float(v) * (100 if metric.startswith("Acc") else 1)
             metrics[f"{dataset}-{metric}"] = value
         except Exception:
             continue
-
     return metrics
 
 

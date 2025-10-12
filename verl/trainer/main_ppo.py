@@ -22,7 +22,7 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from train.reward import CountdownMathRewardManager
+from data.reward import CountdownMathRewardManager
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer

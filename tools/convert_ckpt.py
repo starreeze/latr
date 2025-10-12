@@ -5,9 +5,8 @@ from verl.model_merger.fsdp_model_merger import FSDPModelMerger
 
 base_model = "/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B"
 
-if __name__ == "__main__":
-    local_dir = sys.argv[1]
-    target_dir = sys.argv[2]
+
+def convert(local_dir: str, target_dir: str):
     config = ModelMergerConfig(
         operation="merge",
         backend="fsdp",
@@ -17,3 +16,9 @@ if __name__ == "__main__":
     )
     merger = FSDPModelMerger(config)
     merger.merge_and_save()
+
+
+if __name__ == "__main__":
+    local_dir = sys.argv[1]
+    target_dir = sys.argv[2]
+    convert(local_dir, target_dir)

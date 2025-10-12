@@ -578,7 +578,7 @@ def generate(
                 print(f"rank {rank} stopping due to all kt seqs are full")
                 break
 
-    print(str(times))
+    # print(str(times))
 
     if orig_ids is not None:
         seq_len = orig_ids.shape[1]

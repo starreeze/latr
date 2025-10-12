@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
 import shutil
 import warnings
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from glob import glob
 from itertools import combinations
 from typing import Any, cast
 
 from datasets import Dataset
+from natsort import natsorted
 from rouge_score import rouge_scorer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -94,11 +97,18 @@ class EvalArgs:
     max_tokens: int = 1024
     start_pos: int = 0
     end_pos: int = 1024
-    batch_size: int = 4
+    batch_size: int = 16
     out_dir: str = "outputs/diverse"
-    calc_path: str = ""
+    calc_path: list[str] = field(default_factory=list)
     method: str = "our"  # old
     run_name: str = ""
+
+    rollout_filter_edit_dist_thres: float | None = 0.4
+    rollout_filter_suffix_match_thres: float | None = None
+    rollout_filter_rouge_l_thres: float | None = None
+    prob_filter_abs_thres: float = 0.25
+    prob_filter_rel_thres: float = 0.15
+    rollout_filter_steps: list[int] = field(default_factory=lambda: [20, 30, 50])
 
 
 class EvalCollator:
@@ -159,12 +169,12 @@ def inference(args: EvalArgs):
         num_return_sequences=args.num_generation,
         return_on_full=False,
         sample_nk="full",
-        rollout_filter_edit_dist_thres=None,
-        rollout_filter_suffix_match_thres=0.2,
-        rollout_filter_rouge_l_thres=0.4,
-        prob_filter_abs_thres=0.2,
-        prob_filter_rel_thres=0.2,
-        rollout_filter_steps=[10, 20, 30, 50],
+        rollout_filter_edit_dist_thres=args.rollout_filter_edit_dist_thres,
+        rollout_filter_suffix_match_thres=args.rollout_filter_suffix_match_thres,
+        rollout_filter_rouge_l_thres=args.rollout_filter_rouge_l_thres,
+        prob_filter_abs_thres=args.prob_filter_abs_thres,
+        prob_filter_rel_thres=args.prob_filter_rel_thres,
+        rollout_filter_steps=args.rollout_filter_steps,
     )
     kt_modules = KtModules()
     group_metrics = []
@@ -241,21 +251,39 @@ def inference(args: EvalArgs):
             f.write(json.dumps(metric) + "\n")
 
 
+def get_sort_key(x: tuple[str, dict[str, Any]]):
+    step, run = x[0].split("_", 1)
+    return run, step
+
+
 def calculate(args: EvalArgs):
-    path = args.calc_path
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"File {path} not found")
-    files = glob(os.path.join(path, "*.jsonl"))
-    metrics = []
-    for file in files:
-        with open(file, "r") as f:
-            metrics.extend([json.loads(line) for line in f])
-    keys = metrics[0].keys()
-    for key in keys:
-        if key == "generations":
+    name_values = defaultdict(dict)
+    keys = None
+    for path in args.calc_path:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"File {path} not found")
+        files = glob(os.path.join(path, "*.jsonl"))
+        if not files:
             continue
-        values = sum(metric[key] for metric in metrics) / len(metrics)
-        print(f"{key}: {values:.4f}")
+        name = os.path.basename(path)
+        metrics = []
+        for file in files:
+            with open(file, "r") as f:
+                metrics.extend([json.loads(line) for line in f])
+        keys = list(metrics[0].keys())
+        keys.remove("generations")
+        for key in keys:
+            values = sum(metric[key] for metric in metrics) / len(metrics)
+            print(f"{name} {key}: {values:.4f}")
+            name_values[name][key] = values
+
+    assert keys is not None
+
+    with open(os.path.join(args.out_dir, "metrics.csv"), "w") as f:
+        writer = csv.writer(f)
+        writer.writerow(["name"] + keys)
+        for name, values in natsorted(name_values.items(), key=get_sort_key):
+            writer.writerow([name] + [values.get(key, "") for key in keys])
 
 
 if __name__ == "__main__":
