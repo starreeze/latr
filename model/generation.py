@@ -80,6 +80,9 @@ def _init_generation_config(
 
     if kt_modules.sched is None:
         kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, config.__dict__)
+    if kt_modules.sched.mix_ratio is None:
+        kt_modules.sched.mix_ratio = list(config.mix_ratio_schedule.items())[0][1]
+    assert 0 <= kt_modules.sched.mix_ratio <= 1
     kt_n_gen = round(config.num_return_sequences * kt_modules.sched.mix_ratio)
 
     if stopping_criteria is None:
@@ -367,7 +370,7 @@ def generate(
     )
     eos_id = cast(int, tokenizer.eos_token_id)
     pad_id = cast(int, tokenizer.pad_token_id)
-    assert kt_modules.sched is not None
+    assert kt_modules.sched is not None and kt_modules.sched.mix_ratio is not None
     kt_n_gen = 0 if config.fallback else round(config.num_return_sequences * kt_modules.sched.mix_ratio)
     if kt_n_gen == 0 and config.return_on_full:
         return GenerateKeyTokenOutput(sequences=cast(torch.LongTensor, input_ids))

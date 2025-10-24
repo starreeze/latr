@@ -1,19 +1,19 @@
-DATA_DIR=dataset/countdown-base
+DATA_DIR=dataset/math-base
 BASE_MODEL=/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B
 N_GPUS=8
-MODEL_ARCH=qwen2
+EXPERIMENT_NAME=grpo-kt-math
 
 python -m verl.trainer.main_ppo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
     data.train_batch_size=256 \
-    data.max_prompt_length=256 \
-    data.max_response_length=1024 \
+    data.max_prompt_length=1024 \
+    data.truncation=left \
     data.dataloader_num_workers=0 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.clip_ratio=0.2 \
@@ -27,7 +27,11 @@ python -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.name=kt \
+    +actor_rollout_ref.rollout.kt_mixed_engine=True \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
     actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.response_length=8192 \
+    actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.val_kwargs.n=8 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
@@ -46,7 +50,7 @@ python -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
     trainer.save_freq=500 \
-    trainer.test_freq=10 \
+    trainer.test_freq=20 \
     trainer.project_name=SampleRL \
     trainer.experiment_name=$EXPERIMENT_NAME \
     +actor_rollout_ref.rollout.kt.max_n_branch_per_token=2 \
@@ -55,7 +59,7 @@ python -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.kt.prob_filter_rel_thres=0.15 \
     +actor_rollout_ref.rollout.kt.rollout_filter_edit_dist_thres=0.4 \
     +actor_rollout_ref.rollout.kt.rollout_filter_steps="[20,30,50]" \
-    +actor_rollout_ref.rollout.kt.mix_ratio_schedule="{0:1,10:0.75,20:0.5,80:0.25,200:0}" \
+    +actor_rollout_ref.rollout.kt.mix_ratio_schedule="{0:1,50:0.75,100:0.5}" \
     +actor_rollout_ref.rollout.kt.return_nb_thres_decay=0.05 \
-    +actor_rollout_ref.rollout.kt.force_return_step=512 \
+    +actor_rollout_ref.rollout.kt.force_return_step=1024 \
     2>&1 | tee $EXPERIMENT_NAME.log

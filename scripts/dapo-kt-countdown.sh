@@ -68,5 +68,4 @@ python -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.kt.mix_ratio_schedule="{0:1,10:0.75,20:0.5,80:0.25,200:0}" \
     +actor_rollout_ref.rollout.kt.return_nb_thres_decay=0.05 \
     +actor_rollout_ref.rollout.kt.force_return_step=512 \
-    +actor_rollout_ref.rollout.kt.model_arch=$MODEL_ARCH \
     2>&1 | tee $EXPERIMENT_NAME.log

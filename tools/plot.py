@@ -37,6 +37,8 @@ parser.add_argument("--y_tick", type=float, nargs="+", default=[])
 parser.add_argument("--x_tick", type=float, nargs="+", default=[])
 parser.add_argument("--set_label", default="true")
 parser.add_argument("--legend", default="lower_right")
+parser.add_argument("--marker", default="true")
+parser.add_argument("--y_label", default="Average Validation Reward")
 args = parser.parse_args()
 
 mpl.rcParams.update({"font.size": 20})
@@ -58,7 +60,7 @@ if args.interval > 0:
 fig, ax = plt.subplots(figsize=(8, 6))
 
 colors = ["#8cc5e3", "#c46666", "#2066a8", "#a00000"]
-markers = ["o", "o", "s", "s"]
+markers = ["o", "o", "s", "s"] if args.marker == "true" else [None] * 4
 
 # Plot each line with markers
 for i, col in enumerate(df.columns[1:]):  # Skip main column
@@ -68,17 +70,17 @@ for i, col in enumerate(df.columns[1:]):  # Skip main column
         label=col,
         color=colors[i],
         marker=markers[i],
-        markersize=12,
+        markersize=12 if args.marker == "true" else None,
         linewidth=4,
-        markeredgecolor="white",
-        markeredgewidth=1.5,
+        markeredgecolor="white" if args.marker == "true" else None,
+        markeredgewidth=1.5 if args.marker == "true" else None,
     )
 
 # --- STYLING ---
 # ax.set_title("Algorithm Performance Comparison", fontsize=16, fontweight="bold", pad=20)
 if args.set_label == "true":
     ax.set_xlabel(main_key)
-    ax.set_ylabel("Average Validation Reward")
+    ax.set_ylabel(args.y_label)
 
 min_y = args.min_y if args.min_y else None
 max_y = args.max_y if args.max_y else None

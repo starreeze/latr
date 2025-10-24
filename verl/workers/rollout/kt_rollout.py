@@ -13,6 +13,7 @@ from transformers.modeling_utils import PreTrainedModel
 from vllm import LLM, SamplingParams
 
 from model.generation import KeyTokenGenConfig, KtModules, generate
+from model.utils import BranchParamScheduler
 from tools.utils import init_dataclass_from_dict
 from verl import DataProto
 from verl.utils.device import get_device_name
@@ -70,6 +71,10 @@ class KTRollout(BaseRollout):
             self.vllm_engine = None
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
+        if self.kt_modules.sched is None:
+            self.kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, self.kt_config.__dict__)
+        self.kt_modules.sched.set_step(prompts.meta_info["global_steps"])
+
         if self.vllm_engine is not None:
             rank = dist.get_rank()
             torch.cuda.empty_cache()
@@ -136,9 +141,7 @@ class KTRollout(BaseRollout):
 
         assert self.kt_modules.sched is not None
         if not is_validate:
-            self.kt_modules.sched.step(
-                prompts.meta_info["global_steps"], output.suppress_ratio, output.empty_branch_ratio
-            )
+            self.kt_modules.sched.step_filter_params(output.suppress_ratio, output.empty_branch_ratio)
 
         kt_seqs = output.sequences
         generated_batch_size = kt_seqs.size(0)  # bs * num_return_sequences

@@ -58,7 +58,7 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     output_hidden_states: bool = False
     max_n_branch_per_token: int = 2
     # full: do sample only when branches are full; always: do sample whenever there is only one valid candidate
-    sample_nk: Literal["none", "full", "always"] = "full"
+    sample_nk: Literal["none", "full", "always"] = "none"
     # return the incomplete sequences when the branches are all full in generation
     return_on_full: bool = True
     return_nb_thres_init: float = 0.98  # higher than thres are considered full at initial step
@@ -92,8 +92,7 @@ class BranchParamScheduler(BranchDynamicParam):
     adjusted_steps: int = 0
 
     def __post_init__(self):
-        self.mix_ratio = self.mix_ratio_schedule.pop(0)
-        print(f"step 0 mix_ratio: {self.mix_ratio}")
+        self.mix_ratio = None
 
     def _step_up(self):  # more strict
         if self.adjusted_steps >= self.max_n_step:
@@ -135,13 +134,7 @@ class BranchParamScheduler(BranchDynamicParam):
         if self.model_filter_rollout_thres is not None:
             self.model_filter_rollout_thres += self.param_scheduler_step
 
-    def step(self, global_step: int, suppress_ratio: float | None, empty_branch_ratio: float | None):
-        # step based params
-        if global_step in self.mix_ratio_schedule:
-            self.mix_ratio = self.mix_ratio_schedule.pop(global_step)
-        print(f"step {global_step} mix_ratio: {self.mix_ratio}")
-
-        # step up/down the filter params
+    def step_filter_params(self, suppress_ratio: float | None, empty_branch_ratio: float | None):
         if self.enable_param_scheduler and suppress_ratio is not None and empty_branch_ratio is not None:
             if suppress_ratio > self.suppress_ratio_thres:
                 self._step_up()
@@ -149,6 +142,15 @@ class BranchParamScheduler(BranchDynamicParam):
             if empty_branch_ratio > self.empty_branch_ratio_thres:
                 self._step_down()
                 print("step down")
+        return self
+
+    def set_step(self, global_step: int):
+        step_ratios = list(self.mix_ratio_schedule.items())
+        idx = 0
+        while idx < len(step_ratios) - 1 and step_ratios[idx + 1][0] <= global_step:
+            idx += 1
+        self.mix_ratio = step_ratios[idx][1]
+        print(f"step {global_step} mix_ratio: {self.mix_ratio}")
         return self
 
 

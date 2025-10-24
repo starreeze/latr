@@ -20,6 +20,7 @@ import logging
 import os
 import warnings
 from dataclasses import asdict
+from datetime import timedelta
 from typing import Any
 
 import psutil
@@ -123,6 +124,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 rank=rank,
                 world_size=world_size,
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
+                timeout=timedelta(seconds=int(os.environ.get("NCCL_TIMEOUT", "18000"))),
             )
 
         # build device mesh for FSDP

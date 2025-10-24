@@ -1,3 +1,0 @@
-accelerate launch --num_processes 8 --config_file configs/zero1.yaml \
-    -m train.diverge --load_path /home/nfs06/model/Qwen3-Embedding-0.6B --per_device_train_batch_size 64 --per_device_eval_batch_size 256 --learning_rate 5e-6 --run_name divergence-train --eval_strategy steps --eval_steps 10 --save_path outputs/diverge_test \
-    --bf16 --optim adamw_8bit --lr_scheduler_type cosine --warmup_ratio 0.1 --logging_steps 1 --num_train_epochs 3 --weight_decay 0.1

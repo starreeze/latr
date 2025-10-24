@@ -1,8 +1,8 @@
-# Lookahead Tree-Based Sampling for RLVR
+# Lookahead Tree-Based Rollouts for RLVR
 
 This is the official implementation of the paper _Lookahead Tree-Based Rollouts for Enhanced Trajectory-Level Exploration in Reinforcement Learning with Verifiable Rewards_.
 
-[!img](assets/overview.jpg)
+![overview](assets/overview.jpg)
 
 ## Installation
 
@@ -14,6 +14,10 @@ pip install -r requirements.txt
 
 ### Data
 
+Please directly download the dataset from [here](https://huggingface.co/datasets/starreeze/latr-data) and put the two directories (countdown-base, math-base) in `dataset/`.
+
+If you want to generate the dataset yourself, please refer to `data/verl_gen.py`:
+
 ```bash
 python -m data.verl_gen --dataset NAME --src SRC --dst DST --template_type TEMPLATE_TYPE
 ```
@@ -22,8 +26,6 @@ python -m data.verl_gen --dataset NAME --src SRC --dst DST --template_type TEMPL
 - src: the source dataset name or a local path, default to `Jiayi-Pan/Countdown-Tasks-3to4`
 - dst: the destination path to save the verl-ready dataset, default to `dataset/countdown`
 - template_type: the template type, currently only support `base`
-
-For math500 and olympiad bench, please download our processed dataset from ... and use local path as src. For other datasets, we use the original dataset from HuggingFace.
 
 ### Training
 
@@ -76,7 +78,8 @@ We modify the VeRL framework to support our rollout method, majorly including:
 - `verl/trainer/ppo/ray_trainer.py:l1195-1199,l1239-1253`: implement logic for diversity filtering in ablation study.
 - `verl/trainer/constants_ppo.py`: the runtime environment for PPO training, which is modified to set the `RAY_DEBUG` environment variable to `1` to enable the debug mode.
 - `verl/trainer/main_ppo.py:l205-208`: inject reward function for countdown since there's no built-in ones.
-- `verl/workers/fsdp_workers.py:l496-503`: the worker initialization, which is modified to initialize our own rollout worker when `rollout.name` is `kt`.
+- `verl/workers/fsdp_workers.py:l127`: add timeout to the distributed initialization.
+- `verl/workers/fsdp_workers.py:l499-506`: the worker initialization, which is modified to initialize our own rollout worker when `rollout.name` is `kt`.
 - `verl/workers/rollout/kt_rollout.py`: the rollout worker, which is a subclass of `BaseRollout` in `verl/workers/rollout/base.py`. The worker reads the rollout config and pass it to the `generate` method in `model/generation.py`, where the core sampling logic is implemented.
 
 ## Citation
@@ -86,3 +89,11 @@ If you find this useful, please consider citing:
 ```bibtex
 ...
 ```
+
+## Acknowledgments
+
+We thank the authors of the following projects for their contributions:
+
+- [VeRL](https://github.com/volcengine/verl)
+- [Qwen](https://github.com/QwenLM/Qwen3)
+- [TinyZero](https://github.com/Jiayi-Pan/TinyZero)
