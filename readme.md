@@ -14,7 +14,7 @@ pip install -r requirements.txt
 
 ### Data
 
-Please directly download the dataset from [here](https://huggingface.co/datasets/starreeze/latr-data) and put the two directories (countdown-base, math-base) in `dataset/`.
+Please directly download our processed dataset from [here](https://huggingface.co/datasets/starreeze/latr-data/tree/main) and put the two directories (countdown-base, math-base) in `dataset/`.
 
 If you want to generate the dataset yourself, please refer to `data/verl_gen.py`:
 
@@ -29,14 +29,14 @@ python -m data.verl_gen --dataset NAME --src SRC --dst DST --template_type TEMPL
 
 ### Training
 
-We implement on the standard VeRL-0.5.0 framework. Training scripts are provided in `scripts`, with names organized as `{algorithm}-{rollout}-{dataset}.sh`. For rollout name, `vllm` represents stochastic sampling, and `kt` represents looKahead Tree-based rollouts (LATR).
+We implement on the standard VeRL-0.5.0 framework. Training scripts are provided in `scripts`, with names organized as `{algorithm}-{rollout}-{dataset}.sh`. For rollout name, `vllm` represents stochastic sampling, and `kt` represents loo**k**ahead **T**ree-based rollouts (LATR).
 
 The `kt` scripts differ from `vllm` only in `actor_rollout_ref.rollout.name` (which calls different rollout workers in `verl/workers/rollout`) and additional kt arguments (those starting with `actor_rollout_ref.rollout.kt`), including:
 
-- `max_n_branch_per_token`: only top-m tokens are considered when branching
-- `prob_filter_abs_thres`: $\tau*{abs}$ in the paper
-- `prob_filter_rel_thres`: $\tau*{rel}$
-- `rollout_filter_edit_dist_thres`: $\tau*{ed}$
+- `max_n_branch_per_token`: only top-m tokens are considered when branching (in addition to thresholds in the paper)
+- `prob_filter_abs_thres`: $\tau_{abs}$ in the paper
+- `prob_filter_rel_thres`: $\tau_{rel}$
+- `rollout_filter_edit_dist_thres`: $\tau_{ed}$
 - `rollout_filter_steps`: $r$
 - `mix_ratio_schedule`: a dict of {training_step: $\eta$}, generally exponential decay but more flexible
 - `return_nb_thres_decay`/`force_return_step`: control the generation step to exit LATR and use stochastic sampling instead
@@ -46,9 +46,9 @@ The `kt` scripts differ from `vllm` only in `actor_rollout_ref.rollout.name` (wh
 We also use the VeRL framework for evaluation. Results can be obtained in two ways:
 
 1. At the last stage of training, evaluation is triggered automatically. The results are printed to the console and logged to both a log file and wandb.
-2. With VeRL checkpoints, you can run evaluation scripts provided in `scripts`, with names organized as `eval-{dataset}.sh`. Just use `bash scripts/eval-{dataset}.sh EXPERIMENT_NAME` to evaluate. The results are printed to the console and logged to a file in `outputs/eval/EXPERIMENT_NAME`.
+2. With VeRL checkpoints, you can run evaluation scripts provided in `scripts`, with names organized as `eval-{dataset}.sh`. Just use `bash scripts/eval-{dataset}.sh EXPERIMENT_NAME` to evaluate. The results are printed to the console and logged to a file in `outputs/results/EXPERIMENT_NAME.log`.
 
-To obtain a csv from log files, use `python tools/read_log.py --path path/to/log/files.log`. The csv will be saved in `./metrics.csv`.
+To obtain a csv from log files, use `python tools/read_log.py path/to/log/file_1.log path/to/log/file_2.log ...`. Both of the above outputs are supported. The csv will be saved in `./metrics.csv`.
 
 ## Implementation Details
 
@@ -87,7 +87,15 @@ We modify the VeRL framework to support our rollout method, majorly including:
 If you find this useful, please consider citing:
 
 ```bibtex
-...
+@misc{latr,
+      title={Lookahead Tree-Based Rollouts for Enhanced Trajectory-Level Exploration in Reinforcement Learning with Verifiable Rewards}, 
+      author={Shangyu Xing and Siyuan Wang and Chenyuan Yang and Xinyu Dai and Xiang Ren},
+      year={2025},
+      eprint={2510.24302},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2510.24302}, 
+}
 ```
 
 ## Acknowledgments

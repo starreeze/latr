@@ -13,6 +13,8 @@ def read_file(path: str) -> dict:
         raise ValueError(f"No match found in {path}")
 
     match = re.sub("\x1b\\[36m\\(TaskRunner pid=\\d+\\)\x1b\\[0m", "", match)
+    match = re.sub("\\s*wandb:.*", "", match)
+    match = re.sub("Training Progress:.+", "", match)
     replaces = {"'": '"', "\n": "", "\r": "", '"': ""}
     raw_metrics = json.loads(match.translate(str.maketrans(replaces)))
     metrics = {}

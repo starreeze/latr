@@ -1,5 +1,5 @@
 DATA_DIR=dataset/math-base
-BASE_MODEL=/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B
+BASE_MODEL=Qwen/Qwen2.5-3B
 N_GPUS=8
 EXPERIMENT_NAME=grpo-kt-math
 

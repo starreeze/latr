@@ -3,7 +3,7 @@ import sys
 from verl.model_merger.base_model_merger import ModelMergerConfig
 from verl.model_merger.fsdp_model_merger import FSDPModelMerger
 
-base_model = "/inspire/hdd/global_user/weizhongyu-24036/effciency_workspace/models/Qwen2.5-3B"
+base_model = "Qwen/Qwen2.5-3B"
 
 
 def convert(local_dir: str, target_dir: str):

@@ -1,5 +1,5 @@
 # trl==0.17.0
-verl==0.5.0
+# verl==0.5.0
 vllm==0.10.0
 natsort
 rich
