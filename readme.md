@@ -16,7 +16,7 @@ pip install -r requirements.txt
 
 Please directly download our processed dataset from [here](https://huggingface.co/datasets/starreeze/latr-data/tree/main) and put the two directories (countdown-base, math-base) in `dataset/`.
 
-If you want to generate the dataset yourself, please refer to `data/verl_gen.py`:
+<!-- Otherwise, if you want to generate your own dataset instead, please refer to `data/verl_gen.py`:
 
 ```bash
 python -m data.verl_gen --dataset NAME --src SRC --dst DST --template_type TEMPLATE_TYPE
@@ -25,21 +25,23 @@ python -m data.verl_gen --dataset NAME --src SRC --dst DST --template_type TEMPL
 - name: the dataset name. Support `countdown`, `amc23`, `math500`, `math_dapo`, `olympiad`, default to `countdown`
 - src: the source dataset name or a local path, default to `Jiayi-Pan/Countdown-Tasks-3to4`
 - dst: the destination path to save the verl-ready dataset, default to `dataset/countdown`
-- template_type: the template type, currently only support `base`
+- template_type: the template type, currently only support `base` -->
 
 ### Training
 
-We implement on the standard VeRL-0.5.0 framework. Training scripts are provided in `scripts`, with names organized as `{algorithm}-{rollout}-{dataset}.sh`. For rollout name, `vllm` represents stochastic sampling, and `kt` represents loo**k**ahead **T**ree-based rollouts (LATR).
+We implement on the standard VeRL-0.5.0 framework. Training scripts provided in `scripts` are ready to run directly, with names organized as `{algorithm}-{rollout}-{dataset}.sh`. For rollout name, `vllm` represents stochastic sampling, and `kt` represents loo**k**ahead **T**ree-based rollouts (LATR).
 
 The `kt` scripts differ from `vllm` only in `actor_rollout_ref.rollout.name` (which calls different rollout workers in `verl/workers/rollout`) and additional kt arguments (those starting with `actor_rollout_ref.rollout.kt`), including:
 
-- `max_n_branch_per_token`: only top-m tokens are considered when branching (in addition to thresholds in the paper)
+- `max_n_branch_per_token`: only top-m tokens are considered when branching (in addition to thresholding conditions in the paper)
 - `prob_filter_abs_thres`: $\tau_{abs}$ in the paper
 - `prob_filter_rel_thres`: $\tau_{rel}$
 - `rollout_filter_edit_dist_thres`: $\tau_{ed}$
 - `rollout_filter_steps`: $r$
 - `mix_ratio_schedule`: a dict of {training_step: $\eta$}, generally exponential decay but more flexible
 - `return_nb_thres_decay`/`force_return_step`: control the generation step to exit LATR and use stochastic sampling instead
+
+Our experiments are conducted on 8xH200 GPUs. For other hardware configurations, you may need to adjust the training parameters following [official VeRL documentation](https://verl.readthedocs.io/en/v0.5.x/examples/config.html), especially the batch size and gradient checkpointing. If you experience consistent OOM in LATR generation process, please consider reducing vllm memory budget `actor_rollout_ref.rollout.gpu_memory_utilization` or generation batch size `actor_rollout_ref.rollout.micro_batch_size`.
 
 ### Evaluation
 
