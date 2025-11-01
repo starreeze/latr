@@ -642,6 +642,6 @@ def generate(
         empty_branch_ratio=empty_branch_ratio,
         num_seq=len(branch_info),
         branching_ratio=all_branching_token_count / total_length,
-        pruning_ratio=rf_stats["remove"] / rf_stats["total"],
+        pruning_ratio=rf_stats["remove"] / rf_stats["total"] if rf_stats["total"] else 0,
         avg_saturate_len=total_saturate_len / len(groups),
     )

@@ -105,6 +105,7 @@ class KTRollout(BaseRollout):
             self.vllm_engine.sleep(level=2)
         output = DataProto.concat(output)
         self.module.train()
+        torch.cuda.empty_cache()
         return output
 
     @torch.no_grad()

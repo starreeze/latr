@@ -41,7 +41,10 @@ The `kt` scripts differ from `vllm` only in `actor_rollout_ref.rollout.name` (wh
 - `mix_ratio_schedule`: a dict of {training_step: $\eta$}, generally exponential decay but more flexible
 - `return_nb_thres_decay`/`force_return_step`: control the generation step to exit LATR and use stochastic sampling instead
 
-Our experiments are conducted on 8xH200 GPUs. For other hardware configurations, you may need to adjust the training parameters following [official VeRL documentation](https://verl.readthedocs.io/en/v0.5.x/examples/config.html), especially the batch size and gradient checkpointing. If you experience consistent OOM in LATR generation process, please consider reducing vllm memory budget `actor_rollout_ref.rollout.gpu_memory_utilization` or generation batch size `actor_rollout_ref.rollout.micro_batch_size`.
+Our experiments are conducted on 8xH200 GPUs with peak GPU memory usage around 130GB. For other hardware configurations, you may experience OOM during the training process:
+
+- For OOM in LATR generation process, please consider reducing vllm memory budget `actor_rollout_ref.rollout.gpu_memory_utilization` or generation batch size `actor_rollout_ref.rollout.micro_batch_size`.
+- For OOM in compute_logp or update_policy, please adjust the training parameters following [official VeRL documentation](https://verl.readthedocs.io/en/v0.5.x/examples/config.html), especially the batch size and gradient checkpointing. 
 
 ### Evaluation
 
