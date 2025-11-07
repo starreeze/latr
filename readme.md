@@ -86,6 +86,8 @@ We modify the VeRL framework to support our rollout method, majorly including:
 - `verl/workers/fsdp_workers.py:l127`: add timeout to the distributed initialization.
 - `verl/workers/fsdp_workers.py:l499-506`: the worker initialization, which is modified to initialize our own rollout worker when `rollout.name` is `kt`.
 - `verl/workers/rollout/kt_rollout.py`: the rollout worker, which is a subclass of `BaseRollout` in `verl/workers/rollout/base.py`. The worker reads the rollout config and pass it to the `generate` method in `model/generation.py`, where the core sampling logic is implemented.
+- `verl/protocal.py:l698-701`: modify the `chunk` method to allow non-uniform batch sizes.
+- `verl/utils/reward_score/__init__.py:l43-45`: extend reward function for math-500, amc23 and olympiad.
 
 ## Citation
 

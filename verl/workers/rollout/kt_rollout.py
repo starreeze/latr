@@ -92,13 +92,14 @@ class KTRollout(BaseRollout):
                 f"rank {rank} vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}"
             )
 
-        batch_size = prompts.batch.batch_size[0]
-        if prompts.meta_info.get("validate", False):
-            mbs = self.config.val_kwargs.get("micro_batch_size", batch_size)
+        if prompts.meta_info.get("validate", False) and self.vllm_engine is not None:
+            # for validation, we don't need to chunk the prompts if use vllm
+            batch_prompts = [prompts]
         else:
+            batch_size = prompts.batch.batch_size[0]
             mbs = self.config.get("micro_batch_size", batch_size)
-        num_chunks = max((batch_size + mbs - 1) // mbs, 1)
-        batch_prompts = prompts.chunk(chunks=num_chunks)
+            num_chunks = max((batch_size + mbs - 1) // mbs, 1)
+            batch_prompts = prompts.chunk(chunks=num_chunks)
 
         output = [self._generate_minibatch(p) for p in batch_prompts]
         if self.vllm_engine is not None:
