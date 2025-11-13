@@ -12,7 +12,8 @@ from tools.utils import snake_to_camel
 
 template = {
     "base": "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer.\nUser: {question}\nAssistant: Let me solve this step by step.\n",
-    "inst": "You are a helpful assistant. You first thinks about the reasoning process in the mind and then provides the user with the answer.\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\nLet me solve this step by step.\n",
+    "inst-qwen": "You are a helpful assistant. You first thinks about the reasoning process in the mind and then provides the user with the answer.\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\nLet me solve this step by step.\n",
+    "inst-ds": "<｜begin▁of▁sentence｜><｜User｜>{question}<｜Assistant｜><think>\n",
 }
 
 useful_cloumns = ["prompt", "reward_model", "data_source"]
