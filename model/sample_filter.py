@@ -306,7 +306,8 @@ class RolloutFilter(SequenceFilter):
 
         # Model scores in one call
         if self.filter_model is not None:
-            scores = self.filter_model(**self.collator(model_batch)).scores
+            with torch.no_grad():
+                scores = self.filter_model(**self.collator(model_batch))
             for idx, score in zip(candidate_ids, scores):
                 if score > self.model_filter_thres:
                     remove_set.add(idx)
