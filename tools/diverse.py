@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import pickle
 import re
 import shutil
 import warnings
@@ -12,6 +13,9 @@ from glob import glob
 from itertools import combinations
 from typing import Any, cast
 
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
 from datasets import Dataset
 from natsort import natsorted
 from rouge_score import rouge_scorer
@@ -109,6 +113,7 @@ class EvalArgs:
     prob_filter_abs_thres: float = 0.25
     prob_filter_rel_thres: float = 0.15
     rollout_filter_steps: list[int] = field(default_factory=lambda: [20, 30, 50])
+    model_filter_path: str | None = None
 
 
 class EvalCollator:
@@ -136,7 +141,7 @@ def inference(args: EvalArgs):
     assert args.model, "model is required"
     print(f"running inference from {args.start_pos} to {args.end_pos}")
     model_name = os.path.basename(args.model)
-    filename = f"{args.start_pos}_{args.end_pos}.jsonl"
+    filename = f"{args.start_pos}_{args.end_pos}"
     dir = os.path.join(args.out_dir, model_name + "_" + args.method)
     if args.run_name:
         dir += f"_{args.run_name}"
@@ -175,9 +180,12 @@ def inference(args: EvalArgs):
         prob_filter_abs_thres=args.prob_filter_abs_thres,
         prob_filter_rel_thres=args.prob_filter_rel_thres,
         rollout_filter_steps=args.rollout_filter_steps,
+        enable_rollout_filter_stats=True,
+        model_filter_path=args.model_filter_path,
     )
     kt_modules = KtModules()
     group_metrics = []
+    filter_stats: dict[str, list[float]] = defaultdict(list)
 
     for batch in tqdm(loader):
         input_len = batch["input_ids"].shape[1]
@@ -185,6 +193,9 @@ def inference(args: EvalArgs):
             outputs = generate(
                 model, kt_modules, batch["input_ids"], tokenizer, batch["attention_mask"], config=gen_config
             )
+            assert outputs.rollout_filter_stats is not None
+            for k, v in outputs.rollout_filter_stats.items():
+                filter_stats[k].extend(v)
         else:
             outputs = model.generate(
                 batch["input_ids"].repeat_interleave(args.num_generation, dim=0),
@@ -246,9 +257,11 @@ def inference(args: EvalArgs):
             )
 
     print(f"saving {filename} to {dir}")
-    with open(os.path.join(dir, filename), "w") as f:
+    with open(os.path.join(dir, filename + ".jsonl"), "w") as f:
         for metric in group_metrics:
             f.write(json.dumps(metric) + "\n")
+    with open(os.path.join(dir, filename + ".pkl"), "wb") as f:
+        pickle.dump(filter_stats, f)
 
 
 def get_sort_key(x: tuple[str, dict[str, Any]]):
@@ -259,6 +272,7 @@ def get_sort_key(x: tuple[str, dict[str, Any]]):
 def calculate(args: EvalArgs):
     name_values = defaultdict(dict)
     keys = None
+    filter_stats: dict[str, list[float]] = defaultdict(list)
     for path in args.calc_path:
         if not os.path.exists(path):
             raise FileNotFoundError(f"File {path} not found")
@@ -276,6 +290,27 @@ def calculate(args: EvalArgs):
             values = sum(metric[key] for metric in metrics) / len(metrics)
             print(f"{name} {key}: {values:.4f}")
             name_values[name][key] = values
+
+        files = glob(os.path.join(path, "*.pkl"))
+        for file in files:
+            with open(file, "rb") as f:
+                stats = pickle.load(f)
+                for k, v in stats.items():
+                    filter_stats[k].extend(v)
+
+        df = pd.DataFrame(filter_stats)
+        # plot a scatter plot of the filter stats (model as X, other as Y)
+        # sns.scatterplot(x="model", y=df.columns[1:], data=df)
+        # plt.savefig(os.path.join(path, "filter_stats.jpg"))
+        # plt.close()
+
+        # calculate the correlation coefficient between the filter stats
+        corr = df.corr()
+        print(corr)
+        # plot a heatmap of the correlation coefficient
+        sns.heatmap(corr, annot=True, cmap="coolwarm")
+        plt.savefig(os.path.join(path, "filter_stats_corr.jpg"))
+        plt.close()
 
     assert keys is not None
 

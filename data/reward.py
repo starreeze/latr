@@ -71,7 +71,7 @@ class CountdownMathRewardManager:
 
 # the following is copied from https://github.com/Jiayi-Pan/TinyZero/blob/main/verl/utils/reward_score/countdown.py
 
-identifiers = ["Assistant:", "<|im_start|>assistant", "<｜Assistant｜>"]
+identifiers = ["Assistant:", "<|im_start|>assistant", "<｜Assistant｜>", "<|assistant|>"]
 
 
 def extract_solution(solution_str):

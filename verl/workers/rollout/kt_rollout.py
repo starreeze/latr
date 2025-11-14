@@ -62,6 +62,7 @@ class KTRollout(BaseRollout):
                 enable_prefix_caching=True,
                 trust_remote_code=True,
                 seed=config.get("seed", 0),
+                max_model_len=config.get("response_length", None),
             )
             self.vllm_model = (
                 self.vllm_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model  # type: ignore

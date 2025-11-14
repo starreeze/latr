@@ -221,7 +221,7 @@ class SequenceFilter(ABC):
     @abstractmethod
     def __call__(
         self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int
-    ) -> tuple[set[int], int]:
+    ) -> tuple[set[int], int, dict | None]:
         "return remove indices and the number of total comparisons"
         pass
 
@@ -242,6 +242,7 @@ class RolloutFilter(SequenceFilter):
         filter_model: DivJudge | None,
         keep_math_core_symbols: bool,
         random_pruning_ratio: float,
+        enable_rollout_filter_stats: bool,
     ):
         self.rollout_filter_steps = rollout_filter_steps
         self.edit_dist_thres = edit_dist_thres
@@ -254,10 +255,15 @@ class RolloutFilter(SequenceFilter):
         self.keep_math_core_symbols = keep_math_core_symbols
         self.random_pruning_ratio = random_pruning_ratio
         self.eos_id = cast(int, tokenizer.eos_token_id)
+        self.stats = (
+            None
+            if not enable_rollout_filter_stats
+            else {"edit_dist": [], "suffix_match": [], "rouge_l": [], "model": []}
+        )
 
     def __call__(
         self, completion_ids: torch.Tensor, branch_info: BranchInfo, current_step: int
-    ) -> tuple[set[int], int]:
+    ) -> tuple[set[int], int, dict | None]:
         """
         Apply rollout filter by comparing edit distances and model scores of sequences from branches
         created `rollout_filter_steps` steps ago.
@@ -298,37 +304,46 @@ class RolloutFilter(SequenceFilter):
             )
 
         if not model_batch:
-            return remove_set, 0
+            return remove_set, 0, self.stats
 
         if self.random_pruning_ratio >= 0:
             remove_list = random.sample(candidate_ids, int(len(candidate_ids) * self.random_pruning_ratio))
-            return set(remove_list), len(model_batch)
+            return set(remove_list), len(model_batch), self.stats
 
         # Model scores in one call
-        if self.filter_model is not None:
+        if self.model_filter_thres is not None or self.stats is not None:
+            assert self.filter_model is not None
             with torch.no_grad():
-                scores = self.filter_model(**self.collator(model_batch))
+                scores = self.filter_model(**self.collator(model_batch)).tolist()
             for idx, score in zip(candidate_ids, scores):
-                if score > self.model_filter_thres:
+                if self.model_filter_thres is not None and score < self.model_filter_thres:
                     remove_set.add(idx)
+                if self.stats is not None:
+                    self.stats["model"].append(score)
 
         # Other criteria
         for idx, length, sample in zip(candidate_ids, candidate_lens, model_batch):
             a, b = sample["a"].tolist(), sample["b"].tolist()
-            if self.edit_dist_thres is not None:
+            if self.edit_dist_thres is not None or self.stats is not None:
                 ratio = edit_distance(a, b) / length
-                if ratio < self.edit_dist_thres:
+                if self.edit_dist_thres is not None and ratio < self.edit_dist_thres:
                     remove_set.add(idx)
-            if self.suffix_match_thres is not None:
+                if self.stats is not None:
+                    self.stats["edit_dist"].append(ratio)
+            if self.suffix_match_thres is not None or self.stats is not None:
                 ratio = suffix_match_score(a, b)
-                if ratio > self.suffix_match_thres:
+                if self.suffix_match_thres is not None and ratio > self.suffix_match_thres:
                     remove_set.add(idx)
-            if self.rouge_l_thres is not None:
+                if self.stats is not None:
+                    self.stats["suffix_match"].append(ratio)
+            if self.rouge_l_thres is not None or self.stats is not None:
                 ratio = rouge_l_score(a, b)
-                if ratio > self.rouge_l_thres:
+                if self.rouge_l_thres is not None and ratio > self.rouge_l_thres:
                     remove_set.add(idx)
+                if self.stats is not None:
+                    self.stats["rouge_l"].append(ratio)
 
-        return remove_set, len(model_batch)
+        return remove_set, len(model_batch), self.stats
 
 
 class CumulativeProbFilter(SequenceFilter):
@@ -346,9 +361,9 @@ class CumulativeProbFilter(SequenceFilter):
 
     def __call__(
         self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int
-    ) -> tuple[set[int], int]:
+    ) -> tuple[set[int], int, dict | None]:
         if current_step % self.interval:
-            return set(), 0
+            return set(), 0, None
 
         remove_set: set[int] = set()
         has_eos = (sequences == self.eos_id).any(dim=-1)
@@ -364,7 +379,7 @@ class CumulativeProbFilter(SequenceFilter):
                 if b.parent is not None and b.accumulated_logp - max_p < self.log_thres * current_step:
                     remove_set.add(idx)
 
-        return remove_set, len(sequences)
+        return remove_set, len(sequences), None
 
 
 class SequenceFilterList:
@@ -373,18 +388,21 @@ class SequenceFilterList:
 
     def __call__(
         self, sequences: torch.Tensor, branch_info: BranchInfo, current_step: int
-    ) -> tuple[set[int], dict[str, float], dict[str, dict[str, int]]]:
+    ) -> tuple[set[int], dict[str, float], dict[str, dict[str, int]], dict[str, list[float]]]:
         remove_set: set[int] = set()
         times = {}
         comparisons = {}
+        total_stats = {}
         for filter in self.filters:
             name = filter.__class__.__name__
             start = time.time()
-            idx_to_remove, num_comparisons = filter(sequences, branch_info, current_step)
+            idx_to_remove, num_comparisons, stats = filter(sequences, branch_info, current_step)
+            if stats is not None:
+                total_stats.update(stats)
             remove_set.update(idx_to_remove)
             times[f"kt_seq_filter/{name}"] = time.time() - start
             comparisons[name] = {"remove": len(idx_to_remove), "total": num_comparisons}
-        return remove_set, times, comparisons
+        return remove_set, times, comparisons, total_stats
 
     def append(self, filter: SequenceFilter):
         self.filters.append(filter)
@@ -450,6 +468,7 @@ def create_sequence_filter(
     filter_model: DivJudge | None,
     keep_math_core_symbols: bool,
     random_pruning_ratio: float,
+    enable_rollout_filter_stats: bool,
 ) -> SequenceFilterList:
     filters = []
 
@@ -464,6 +483,7 @@ def create_sequence_filter(
             filter_model,
             keep_math_core_symbols,
             random_pruning_ratio,
+            enable_rollout_filter_stats,
         )
         filters.append(rollout_filter)
 

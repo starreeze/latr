@@ -76,6 +76,7 @@ class KeyTokenGenConfigMixin(BranchDynamicParam):
     rollout_filter_steps: list[int] = field(default_factory=lambda: [20, 30, 50])
     cumulative_prob_filter_interval: int = 10
     keep_math_symbols: bool = True
+    enable_rollout_filter_stats: bool = False
 
     # fallback for ablation study
     random_branching_ratio: float = -1
@@ -163,6 +164,7 @@ class GenerateKeyTokenOutput(GenerateDecoderOnlyOutput):
     branching_ratio: float | None = None
     pruning_ratio: float | None = None
     avg_saturate_len: float | None = None
+    rollout_filter_stats: dict[str, list[float]] | None = None
 
 
 class MixedCache:

@@ -129,6 +129,7 @@ def _init_generation_config(
         kt_modules.filter,
         config.keep_math_symbols,
         config.random_pruning_ratio,
+        config.enable_rollout_filter_stats,
     )
 
     return (config, sequence_filters, key_token_filters, stopping_criteria, logits_proc)
@@ -416,7 +417,8 @@ def generate(
     branch_info = BranchInfo(n_roots=bs_roots) if kt_n_gen else None
     all_suppressed = 0
     all_branching_token_count = 0
-    sequence_filter_stats: dict[str, dict[str, int]] = {}
+    ratio_stats: dict[str, dict[str, int]] = {}
+    filter_stats: dict[str, list[float]] = defaultdict(list)
     times = defaultdict(float)
     printed_complete = False
 
@@ -505,9 +507,14 @@ def generate(
             # Rollout filtering
             if sequence_filters is not None:
                 completion_ids = kt_ids[:, input_len:]
-                remove_set, sf_times, sf_stats = sequence_filters(completion_ids, branch_info, step + 1)
-                update_additive_stats(sequence_filter_stats, sf_stats)
-                update_additive_stats(times, sf_times)
+                remove_set, sf_time, ratio_stat, filter_stat = sequence_filters(
+                    completion_ids, branch_info, step + 1
+                )
+                update_additive_stats(ratio_stats, ratio_stat)
+                if config.enable_rollout_filter_stats:
+                    for k, v in filter_stat.items():
+                        filter_stats[k].extend(v)
+                update_additive_stats(times, sf_time)
 
                 update_remove_start = time.time()
                 times["kt_seq_filter"] += update_remove_start - filter_start
@@ -633,7 +640,7 @@ def generate(
     total_saturate_len = sum(max(branch_info[b].birth_step for b in g) for g in groups.values())
     stop_lens[stop_lens == 0] = config.max_new_tokens
     total_length = int(stop_lens.sum())
-    rf_stats = sequence_filter_stats["RolloutFilter"]
+    rf_stats = ratio_stats["RolloutFilter"]
 
     return GenerateKeyTokenOutput(
         sequences=cast(torch.LongTensor, sequences),
@@ -644,4 +651,5 @@ def generate(
         branching_ratio=all_branching_token_count / total_length,
         pruning_ratio=rf_stats["remove"] / rf_stats["total"] if rf_stats["total"] else 0,
         avg_saturate_len=total_saturate_len / len(groups),
+        rollout_filter_stats=filter_stats if config.enable_rollout_filter_stats else None,
     )
