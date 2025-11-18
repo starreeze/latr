@@ -12,7 +12,8 @@ def read_file(path: str) -> dict:
     if not match:
         raise ValueError(f"No match found in {path}")
 
-    match = re.sub("\x1b\\[36m\\(TaskRunner pid=\\d+\\)\x1b\\[0m", "", match)
+    match = re.sub("\x1b\\[36m\\(\\w+\\s+pid=\\d+\\)\x1b\\[0m", "", match)
+    match = re.sub("Generating:.*", "", match)
     match = re.sub("\\s*wandb:.*", "", match)
     match = re.sub("Training Progress:.+", "", match)
     replaces = {"'": '"', "\n": "", "\r": "", '"': ""}

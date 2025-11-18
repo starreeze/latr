@@ -42,8 +42,10 @@ class KTRollout(BaseRollout):
         self.tokenizer = AutoTokenizer.from_pretrained(path)
         self.kt_modules = KtModules()
 
-        self.pad_token_id = cast(int, self.tokenizer.pad_token_id)
         self.eos_token_id = cast(int, self.tokenizer.eos_token_id)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.eos_token_id
+        self.pad_token_id = cast(int, self.tokenizer.pad_token_id)
 
         if config.get("kt_mixed_engine", True):
             self.kt_config.return_on_full = True

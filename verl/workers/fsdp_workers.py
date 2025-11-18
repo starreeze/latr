@@ -502,6 +502,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             rollout = KTRollout(self.actor_module_fsdp, self.config.model.path, config=self.config.rollout)
             rollout_sharding_manager = BaseShardingManager()
+
+        elif rollout_name == "eptree":
+            from verl.workers.rollout.eptree_rollout import EptreeRollout
+            from verl.workers.sharding_manager.base import BaseShardingManager
+
+            rollout = EptreeRollout(
+                self.actor_module_fsdp, self.config.model.path, config=self.config.rollout
+            )
+            rollout_sharding_manager = BaseShardingManager()
         # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! end modify
 
         elif rollout_name == "vllm":
