@@ -1,5 +1,6 @@
 # modified from verl.workers.rollout.hf_rollout.HFRollout
 import copy
+import gc
 from typing import cast
 
 import torch
@@ -73,29 +74,33 @@ class KTRollout(BaseRollout):
         else:
             self.vllm_engine = None
 
+        self.vllm_weights_updated = False
+
+    def update_vllm_weights(self):
+        assert self.vllm_engine is not None
+        rank = dist.get_rank()
+        torch.cuda.empty_cache()
+        self.vllm_engine.wake_up()
+
+        params = convert_weight_keys(
+            self.module.state_dict(),
+            cast(PreTrainedModel, getattr(self.module, "_fsdp_wrapped_module", self.module)),
+        )
+        loaded_params = self.vllm_model.load_weights(
+            (name, (param.to("cuda").full_tensor() if isinstance(param, DTensor) else param))  # type: ignore
+            for name, param in params.items()
+        )
+        print(f"rank {rank} vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
+
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         if self.kt_modules.sched is None:
             self.kt_modules.sched = init_dataclass_from_dict(BranchParamScheduler, self.kt_config.__dict__)
         self.kt_modules.sched.set_step(prompts.meta_info["global_steps"])
+        validate = prompts.meta_info.get("validate", False)
+        assert self.kt_modules.sched.mix_ratio is not None
+        self.vllm_weights_updated = False
 
-        if self.vllm_engine is not None:
-            rank = dist.get_rank()
-            torch.cuda.empty_cache()
-            self.vllm_engine.wake_up()
-
-            params = convert_weight_keys(
-                self.module.state_dict(),
-                cast(PreTrainedModel, getattr(self.module, "_fsdp_wrapped_module", self.module)),
-            )
-            loaded_params = self.vllm_model.load_weights(
-                (name, (param.to("cuda").full_tensor() if isinstance(param, DTensor) else param))  # type: ignore
-                for name, param in params.items()
-            )
-            print(
-                f"rank {rank} vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}"
-            )
-
-        if prompts.meta_info.get("validate", False) and self.vllm_engine is not None:
+        if validate and self.vllm_engine is not None:
             # for validation, we don't need to chunk the prompts if use vllm
             batch_prompts = [prompts]
         else:
@@ -105,10 +110,13 @@ class KTRollout(BaseRollout):
             batch_prompts = prompts.chunk(chunks=num_chunks)
 
         output = [self._generate_minibatch(p) for p in batch_prompts]
+
         if self.vllm_engine is not None:
             self.vllm_engine.sleep(level=2)
+
         output = DataProto.concat(output)
         self.module.train()
+        gc.collect()
         torch.cuda.empty_cache()
         return output
 
@@ -132,6 +140,10 @@ class KTRollout(BaseRollout):
             for k in ["temperature", "top_k", "top_p"]:
                 setattr(config, k, getattr(self.config, k))
         config.max_new_tokens = self.config.response_length
+
+        assert self.kt_modules.sched is not None and self.kt_modules.sched.mix_ratio is not None
+        if self.kt_modules.sched.mix_ratio > 0 and not is_validate and self.vllm_engine is not None:
+            self.vllm_engine.sleep(level=2)
 
         rank = dist.get_rank()
         with autocast(device_type=get_device_name(), dtype=torch.bfloat16):
@@ -183,7 +195,13 @@ class KTRollout(BaseRollout):
             return DataProto(batch=batch)
 
         assert self.vllm_engine is not None
+        gc.collect()
         torch.cuda.empty_cache()
+
+        self.vllm_engine.wake_up()
+        if not self.vllm_weights_updated:
+            self.update_vllm_weights()
+            self.vllm_weights_updated = True
 
         target_vllm_response_length = self.config.response_length - response_length
         params = SamplingParams(

@@ -31,7 +31,7 @@ python -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
     actor_rollout_ref.rollout.name=kt \
     +actor_rollout_ref.rollout.kt_mixed_engine=True \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.response_length=8192 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
