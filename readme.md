@@ -1,6 +1,6 @@
 # Lookahead Tree-Based Rollouts for RLVR
 
-This is the official implementation of the paper _Lookahead Tree-Based Rollouts for Enhanced Trajectory-Level Exploration in Reinforcement Learning with Verifiable Rewards_.
+This is the official implementation of the paper [Lookahead Tree-Based Rollouts for Enhanced Trajectory-Level Exploration in Reinforcement Learning with Verifiable Rewards](https://arxiv.org/abs/2510.24302).
 
 ![overview](assets/overview.jpg)
 
@@ -41,10 +41,10 @@ The `kt` scripts differ from `vllm` only in `actor_rollout_ref.rollout.name` (wh
 - `mix_ratio_schedule`: a dict of {training_step: $\eta$}, generally exponential decay but more flexible
 - `return_nb_thres_decay`/`force_return_step`: control the generation step to exit LATR and use stochastic sampling instead
 
-Our experiments are conducted on 8xH200 GPUs with peak GPU memory usage around 130GB. For other hardware configurations, you may experience OOM during the training process:
+Our experiments are conducted on 8xH200 GPUs with peak GPU memory usage around 130GB. For other hardware configurations, if you experience OOM during the training process:
 
-- For OOM in LATR generation process, please consider reducing vllm memory budget `actor_rollout_ref.rollout.gpu_memory_utilization` or generation batch size `actor_rollout_ref.rollout.micro_batch_size`.
-- For OOM in compute_logp or update_policy, please adjust the training parameters following [official VeRL documentation](https://verl.readthedocs.io/en/v0.5.x/examples/config.html), especially the batch size and gradient checkpointing. 
+- For OOM in LATR generation process, please consider reducing generation batch size `actor_rollout_ref.rollout.micro_batch_size` at the sacrifice of efficiency. This significantly impacts the training speed.
+- For OOM in compute_logp or update_policy, please adjust the training parameters following [official VeRL documentation](https://verl.readthedocs.io/en/v0.5.x/examples/config.html), especially the batch size and gradient checkpointing. This only affects the training speed slightly.
 
 ### Evaluation
 
@@ -77,7 +77,7 @@ verl/                # the verl framework (with our modifications)
 
 ### Modifications to VeRL
 
-We modify the VeRL framework to support our rollout method, majorly including:
+We modify the VeRL framework to support our rollout method, majorly including (note the line numbers may not be accurate due to constant updates):
 
 - `verl/trainer/ppo/metric_utils.py:process_validation_metrics()`: add response length as a validation metric.
 - `verl/trainer/ppo/ray_trainer.py:l1195-1199,l1239-1253`: implement logic for diversity filtering in ablation study.

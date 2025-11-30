@@ -55,11 +55,13 @@ python -m verl.trainer.main_ppo \
     trainer.experiment_name=$EXPERIMENT_NAME \
     +actor_rollout_ref.rollout.kt.max_n_branch_per_token=2 \
     +actor_rollout_ref.rollout.kt.enable_param_scheduler=False \
-    +actor_rollout_ref.rollout.kt.prob_filter_abs_thres=0.25 \
-    +actor_rollout_ref.rollout.kt.prob_filter_rel_thres=0.15 \
-    +actor_rollout_ref.rollout.kt.rollout_filter_edit_dist_thres=0.4 \
+    +actor_rollout_ref.rollout.kt.prob_filter_abs_thres=0.15 \
+    +actor_rollout_ref.rollout.kt.prob_filter_rel_thres=0.25 \
+    +actor_rollout_ref.rollout.kt.rollout_filter_edit_dist_thres=None \
+    +actor_rollout_ref.rollout.kt.rollout_filter_suffix_match_thres=0.2 \
+    +actor_rollout_ref.rollout.kt.rollout_filter_rouge_l_thres=0.5 \
     +actor_rollout_ref.rollout.kt.rollout_filter_steps="[20,30,50]" \
-    +actor_rollout_ref.rollout.kt.mix_ratio_schedule="{0:1,50:0.75,100:0.5}" \
+    +actor_rollout_ref.rollout.kt.mix_ratio_schedule="{0:1,100:0.75,200:0.5,300:0.25}" \
     +actor_rollout_ref.rollout.kt.return_nb_thres_decay=0.05 \
     +actor_rollout_ref.rollout.kt.force_return_step=1024 \
     2>&1 | tee $EXPERIMENT_NAME.log

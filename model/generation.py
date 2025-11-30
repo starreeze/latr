@@ -438,7 +438,6 @@ def generate(
             attention_mask=full_mask,
             past_key_values=cache.to_dynamic(),
             use_cache=True,
-            output_hidden_states=True,
             labels=None,
             return_dict=True,
             logits_to_keep=1,
@@ -587,8 +586,6 @@ def generate(
             if global_all_kt_complete:
                 print(f"rank {rank} stopping due to all kt seqs are full")
                 break
-
-    # print(str(times))
 
     if orig_ids is not None:
         seq_len = orig_ids.shape[1]
