@@ -8,6 +8,8 @@ This is the official implementation of the paper [Lookahead Tree-Based Rollouts 
 
 ```bash
 pip install -r requirements.txt
+# uv is also supported: 
+# uv pip install -r requirements.txt
 ```
 
 ## Run RL
@@ -29,7 +31,17 @@ python -m data.verl_gen --dataset NAME --src SRC --dst DST --template_type TEMPL
 
 ### Training
 
-We implement on the standard VeRL-0.5.0 framework. Training scripts provided in `scripts` are ready to run directly, with names organized as `{algorithm}-{rollout}-{dataset}.sh`. For rollout name, `vllm` represents stochastic sampling, and `kt` represents loo**k**ahead **T**ree-based rollouts (LATR).
+We implement on the standard VeRL-0.5.0 framework. Training scripts provided in `scripts` are ready to run directly, with names organized as `{algorithm}-{rollout}-{dataset}.sh`. For rollout name, `vllm` represents stochastic sampling, and `kt` represents loo**k**ahead **T**ree-based rollouts (LATR). Examples:
+
+```shell
+# run standard RL on countdown
+bash scripts/dapo-vllm-countdown.sh
+
+# run latr on countdown
+bash scripts/dapo-kt-countdown.sh
+```
+
+The results will be logged to the console, `EXPERIMENT_NAME.log`, and wandb.
 
 The `kt` scripts differ from `vllm` only in `actor_rollout_ref.rollout.name` (which calls different rollout workers in `verl/workers/rollout`) and additional kt arguments (those starting with `actor_rollout_ref.rollout.kt`), including:
 

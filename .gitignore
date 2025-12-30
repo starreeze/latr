@@ -1,5 +1,8 @@
 /dataset
+/outputs
+/wandb
 __pycache__
 .pytest_cache
 old
 *.old
+*.log

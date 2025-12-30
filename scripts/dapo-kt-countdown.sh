@@ -2,7 +2,6 @@ DATA_DIR=dataset/countdown-base
 BASE_MODEL=Qwen/Qwen2.5-3B
 N_GPUS=8
 EXPERIMENT_NAME=dapo-kt-countdown
-MODEL_ARCH=qwen2
 
 python -m verl.trainer.main_ppo \
     data.train_files=$DATA_DIR/train.parquet \

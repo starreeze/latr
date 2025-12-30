@@ -6,4 +6,6 @@ wandb
 func_timeout
 nltk
 rouge_score
-transformers==4.53.0
+transformers==4.53.2
+flash_attn
+liger_kernel
