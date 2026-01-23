@@ -59,7 +59,7 @@ class ProbFilter(KeyTokenFilter):
         if self.prob_filter_abs_thres is not None:
             mask = mask & (probs[:, 1:] > self.prob_filter_abs_thres)
         if self.prob_filter_rel_thres is not None:
-            mask = mask & (probs[:, 0:1] - probs[:, 1:] > self.prob_filter_rel_thres)
+            mask = mask & (probs[:, 0:1] - probs[:, 1:] < self.prob_filter_rel_thres)
         return mask
 
 
